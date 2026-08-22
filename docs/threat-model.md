@@ -14,7 +14,7 @@ wired to any package manager. **Nothing in section 6 constitutes protection of a
 real install today.** See section 7 for the precise gap between design and
 implementation.
 
-Document version: 2. Last reviewed: 2026-08-22.
+Document version: 3. Last reviewed: 2026-08-22.
 
 **Design note, recorded because it departs from the v0 plan.** The plan specified
 environment variables "filtered by shape (prefix, and any name containing TOKEN,
@@ -187,6 +187,11 @@ attacker's, and are marked.
 | An audit entry cannot be removed, reordered, or forged into the middle without detection | Each entry commits to its predecessor's hash | `TestTamperDetection::test_removing_a_middle_entry_is_detected`, `::test_reordering_entries_is_detected`, `::test_splicing_a_forged_entry_is_detected` |
 | Fixing an edited entry's own hash does not repair the chain | Later entries still commit to the original hash | `TestTamperDetection::test_recomputing_the_hash_after_editing_is_still_detected` |
 | Appending to an already-broken log is refused | Tail is verified before extension | `TestTamperDetection::test_appending_to_a_tampered_log_is_refused` |
+| A denied host is refused at the enforcement point, not merely judged | Proxy returns 403 and never opens the upstream connection | `test_proxy.py::TestEnforcement::test_denied_host_is_refused` |
+| A `Host:` header cannot launder a denied CONNECT target | Decision uses the CONNECT target only; headers are drained and ignored | `TestEnforcement::test_host_header_cannot_override_connect_target` |
+| An allowlisted host is not reachable on an arbitrary port | Proxy restricts tunnelling to port 443 | `TestEnforcement::test_non_standard_port_refused_on_allowlisted_host` |
+| Plain HTTP through the proxy is refused rather than forwarded | Only CONNECT is accepted; absolute-URI requests are rejected | `TestRequestParsing::test_non_connect_methods_refused` |
+| Every egress decision reaches the log | Proxy records before responding | `TestEnforcement::test_every_decision_is_recorded` |
 
 Two deliberate properties worth stating because they surprise people:
 
@@ -208,17 +213,20 @@ the control is removed, bulkhead prevents nothing about a real install.
 | Environment filtering: deciding what may cross | `runner.py` | **Written and tested** (section 6) |
 | Environment filtering: applying that decision to a real container | `runner.py` | Not written |
 | Network topology: install container has no route out | `runner.py` | Not written |
-| Egress enforcement at the proxy | `proxy.py` | Not written |
+| Egress enforcement: CONNECT handling and the allow/deny response | `proxy.py` | **Written and tested** (section 6) |
+| Egress enforcement: the proxy being the only route out | `runner.py` | Not written |
 | Hash-chained audit log: tamper-evident structure | `audit.py` | **Written and tested** (section 6) |
 | Hash-chained audit log: written where the payload cannot reach it | `runner.py` | Not written |
 | Executable attack scenario corpus | `tests/attacks/` | Not written |
 
 Until then bulkhead is a set of correct answers to questions nothing is asking.
 The environment filter selects the right variables to withhold, and nothing
-consumes its output. The policy engine reaches the right verdict, and nothing
-enforces it. Both are necessary and neither is sufficient, and the gap between
-"the decision is right" and "the install is constrained" is the entire remaining
-build.
+consumes its output. The proxy refuses the right destinations, and nothing routes
+an install through it. The audit log is tamper-evident, and it lives wherever the
+caller puts it. Each part is necessary and none is sufficient, because every one
+of them assumes a topology that does not exist yet. The gap between "the decision
+is right" and "the install is constrained" is the whole of the remaining build,
+and it is a single row of this table: the install container having no route out.
 
 Because none of the above exists, `bh run` refuses to execute rather than running
 an install without an enforcement point. This is the fail-closed default from
@@ -256,9 +264,15 @@ to read it and not find a gap that was left undisclosed.
 
 ### 8.2 Limits of the policy engine as written
 
-- **Ports are stripped and ignored.** `registry.npmjs.org:8443` normalizes to
-  `registry.npmjs.org` and is allowed. Policy makes no port distinction, so a
-  service on a non-standard port at an allowlisted host is permitted.
+- **The policy engine still ignores ports.** `bh check npm registry.npmjs.org:8443`
+  reports ALLOW, because normalization strips the port and the decision is made
+  on hostname alone. The restriction to port 443 lives in the proxy, not in
+  policy, so the two disagree when inspected separately. Treat `bh check` as
+  answering "is this host allowed", never "is this destination reachable".
+- **Refusing plain HTTP may break real installs.** The proxy accepts only
+  CONNECT. A package manager or mirror that falls back to unencrypted HTTP will
+  fail rather than be forwarded. This is fail-closed and deliberate, and it is a
+  false-positive risk against a stated budget of near zero.
 - **No IP or certificate pinning.** Policy operates on hostname strings. Whatever
   resolves the name decides the address. An attacker who controls DNS for an
   allowlisted name, or who can rebind it, is not stopped by policy.
