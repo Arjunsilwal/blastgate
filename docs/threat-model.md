@@ -14,7 +14,17 @@ wired to any package manager. **Nothing in section 6 constitutes protection of a
 real install today.** See section 7 for the precise gap between design and
 implementation.
 
-Document version: 1. Last reviewed: 2026-08-22.
+Document version: 2. Last reviewed: 2026-08-22.
+
+**Design note, recorded because it departs from the v0 plan.** The plan specified
+environment variables "filtered by shape (prefix, and any name containing TOKEN,
+SECRET, PASSWORD, KEY)". That is a denylist, and it has to anticipate every
+credential variable that will ever exist. As implemented, the primary control is
+instead a default-deny allowlist of names an install legitimately needs, with the
+shape check retained as a second layer over variables the user forwards
+explicitly. This is strictly more restrictive than the plan and consistent with
+the default-deny principle used everywhere else, but it is a trust-boundary
+change and belongs in the record rather than in a commit message.
 
 ---
 
@@ -144,11 +154,12 @@ Assumed *not* available:
 Every row maps to a test that fails when the control is removed. **A control with
 no test is a claim, not a protection, and belongs in section 8 until it has one.**
 
-All rows below are tested in `tests/test_policy.py`. With one exception they are
-properties of the policy engine: they describe what the *decision function* does,
-not what is enforced against a running install — see section 7. The exception is
-the final row, which is a property of the CLI and is the only row that constrains
-bulkhead's own behaviour rather than an attacker's.
+Every row below is a property of a *pure function*, tested in
+`tests/test_policy.py` and `tests/test_runner.py`. None of them is yet applied to
+a running install, because the container that would apply them does not exist —
+see section 7. Read every row as "the decision is correct", not "the install is
+constrained". Two rows constrain bulkhead's own behaviour rather than an
+attacker's, and are marked.
 
 | Claim | Control | Test |
 |---|---|---|
@@ -165,7 +176,13 @@ bulkhead's own behaviour rather than an attacker's.
 | A host commonly needed but usable for exfiltration is denied unless opted into | Conditional tier, off by default | `TestConditionalRules::test_conditional_denied_by_default` |
 | Enabling one condition does not enable another | Conditions matched by name | `TestConditionalRules::test_conditional_denied_when_different_condition_enabled` |
 | An allowlist entry without a stated reason is rejected at load | Schema validation | `TestPolicySchemaAndLoading::test_rule_without_reason_raises` |
-| `bh run` never executes an install while no enforcement point exists | Fail-closed refusal; no execution path in the CLI | `TestCliRun::test_run_refuses_and_never_executes`, `::test_run_refuses_for_every_ecosystem` |
+| `bh run` never executes an install while no enforcement point exists *(constrains bulkhead)* | Fail-closed refusal; no execution path in the CLI | `TestCliRun::test_run_refuses_and_never_executes`, `::test_run_refuses_for_every_ecosystem` |
+| A host environment variable does not reach the sandbox unless it was named | Default-deny allowlist over variable names | `test_runner.py::TestDefaultDeny::test_unknown_variable_is_withheld`, `::test_variable_invented_tomorrow_is_withheld` |
+| A credential variable from a real registry campaign does not reach the sandbox | Same allowlist; 24 real names asserted | `TestDefaultDeny::test_real_credential_names_are_withheld` |
+| Host proxy settings are not inherited into the sandbox | Withheld by default; bulkhead sets its own | `TestDefaultDeny::test_proxy_settings_are_not_inherited` |
+| Registry-redirection variables are not inherited into the sandbox | Withheld by default | `TestDefaultDeny::test_registry_redirection_is_not_inherited` |
+| A user cannot forward a credential-shaped variable into the sandbox *(constrains bulkhead)* | Second-layer shape check; fails closed on explicit request | `TestExplicitForwarding::test_forwarding_a_credential_fails_closed` |
+| An absent container runtime is a refusal, not a degraded mode *(constrains bulkhead)* | `detect_runtime` raises rather than returning a falsy value | `TestRuntimeDetection::test_missing_runtime_raises_rather_than_returning_none` |
 
 Two deliberate properties worth stating because they surprise people:
 
@@ -184,13 +201,19 @@ the control is removed, bulkhead prevents nothing about a real install.
 | Control | Module | Status |
 |---|---|---|
 | Isolation: project directory is the only mount | `runner.py` | Not written |
-| Credential-shaped environment stripping | `runner.py` | Not written |
+| Environment filtering: deciding what may cross | `runner.py` | **Written and tested** (section 6) |
+| Environment filtering: applying that decision to a real container | `runner.py` | Not written |
 | Network topology: install container has no route out | `runner.py` | Not written |
 | Egress enforcement at the proxy | `proxy.py` | Not written |
 | Hash-chained audit log | `audit.py` | Not written |
 | Executable attack scenario corpus | `tests/attacks/` | Not written |
 
-Until then the policy engine is a correct answer to a question nothing is asking.
+Until then bulkhead is a set of correct answers to questions nothing is asking.
+The environment filter selects the right variables to withhold, and nothing
+consumes its output. The policy engine reaches the right verdict, and nothing
+enforces it. Both are necessary and neither is sufficient, and the gap between
+"the decision is right" and "the install is constrained" is the entire remaining
+build.
 
 Because none of the above exists, `bh run` refuses to execute rather than running
 an install without an enforcement point. This is the fail-closed default from
@@ -242,6 +265,15 @@ to read it and not find a gap that was left undisclosed.
 - **Unicode and IDN hostnames are rejected outright**, not punycode-normalized.
   This is fail-closed and may produce false negatives on legitimate
   internationalized hosts.
+- **The environment filter is blind to values.** It decides by variable *name*
+  only. A secret stored under a name like `BUILD_NUMBER` is not recognised as a
+  secret, and would be forwarded if the user asked for it by name. Shape
+  checking cannot close this and is not claimed to.
+- **The environment is not the only route to a credential.** Filtering variables
+  does nothing about credentials on disk — `~/.npmrc`, `~/.aws`, SSH keys. Those
+  are addressed by the mount boundary, which is not built. Until it is, the
+  environment filter protects against one of the two harvest routes and the more
+  valuable one remains open.
 - **Allowlist trust.** The shipped allowlists are trusted input. A bad entry
   merged into this repository is a direct compromise of the control, which is why
   every entry carries a reason and allowlist changes are reviewed as security
