@@ -1,0 +1,14 @@
+id: registry-traffic-still-works
+title: A legitimate install reaches the registry it needs
+chain_link: 0
+ecosystem: npm
+source: constructed
+expect: allowed
+requires: policy
+target:
+  host: registry.npmjs.org
+  port: 443
+note: >
+  The false-positive guard. Break one legitimate install and the user uninstalls
+  within the hour, so the corpus has to defend working traffic as seriously as it
+  attacks the rest.

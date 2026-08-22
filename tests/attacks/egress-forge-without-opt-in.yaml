@@ -1,0 +1,14 @@
+id: egress-forge-without-opt-in
+title: Payload writes stolen material to a public code forge
+chain_link: 5
+ecosystem: npm
+source: constructed
+expect: denied
+requires: policy
+target:
+  host: github.com
+  port: 443
+note: >
+  A forge is a working exfiltration endpoint that also happens to be a real
+  dependency source. Denied unless the user opts in by name, because the cost of
+  a silent default here is the whole credential set.

@@ -43,12 +43,18 @@ is yes and constrains what that can accomplish.
 |---|---|---|
 | 0 | Threat model | [Written](docs/threat-model.md) |
 | 1 | Policy engine — allowlist load, host matching, allow/deny | Working |
-| 2 | Isolation — container topology, credential stripping | Not built |
-| 3 | Enforcement — egress proxy, hash-chained audit log | Not built |
-| 4 | Executable attack corpus | Not built |
+| 2 | Isolation — container topology, credential stripping | Working |
+| 3 | Enforcement — egress proxy, hash-chained audit log | Built, not yet wired in |
+| 4 | Executable attack corpus | Scenarios written, no executor |
 
-Phases 2 and 3 are the controls the thesis actually depends on. Until they
-exist, bulkhead protects no install. What you can do today is inspect the policy.
+One connection is missing, and it is the one that makes the tool usable. The
+sandbox currently has *no* route out rather than one allowed route, so a real
+install fails inside it — every fetch is blocked, including the legitimate ones.
+The proxy that turns "no route" into "one allowed route" is written and tested
+but is not yet run as a sidecar. That is why `bh run` still refuses.
+
+A sandbox with no network is a valid security state and the correct intermediate
+one. It is not a working install, and the banner above stays until it is.
 
 ## Try the policy engine
 
@@ -111,8 +117,12 @@ most likely to matter to you:
 - **DNS-based exfiltration.** Not detected.
 - **Post-install runtime.** Protects the install, not the application later.
 - **Compromised base image or package manager.** Enforces nothing useful.
-- **Ports are not policy.** `registry.npmjs.org:8443` normalises to the host and
-  is allowed; policy makes no port distinction.
+- **Ports are not policy.** `bh check npm registry.npmjs.org:8443` reports ALLOW
+  because policy decides on hostname alone. The proxy restricts tunnelling to
+  443, so the two disagree when inspected separately.
+- **Your project must live where the runtime can see it.** On macOS the runtime
+  runs in a VM sharing only part of the filesystem; a project outside a shared
+  path cannot be mounted.
 
 ## The rule
 

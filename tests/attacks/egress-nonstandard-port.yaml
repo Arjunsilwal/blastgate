@@ -1,0 +1,15 @@
+id: egress-nonstandard-port
+title: Payload reaches an allowlisted host on an attacker-run port
+chain_link: 5
+ecosystem: npm
+source: constructed
+expect: denied
+requires: proxy
+target:
+  host: registry.npmjs.org
+  port: 8443
+note: >
+  The policy engine strips the port and decides on hostname alone, so this is
+  denied at the proxy rather than by policy. Recorded here because the two
+  components disagree when inspected separately, and the scenario is the thing
+  that keeps that disagreement visible.

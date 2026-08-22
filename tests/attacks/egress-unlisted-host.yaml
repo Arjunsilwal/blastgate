@@ -1,0 +1,14 @@
+id: egress-unlisted-host
+title: Payload opens a connection to an attacker-controlled host
+chain_link: 5
+ecosystem: npm
+source: constructed
+expect: denied
+requires: policy
+target:
+  host: exfil.attacker.test
+  port: 443
+note: >
+  The base case for link 5. Harvested material has to reach a destination, and
+  a destination no install has any business reaching is the chokepoint the whole
+  design is built on.

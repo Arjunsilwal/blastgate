@@ -1,0 +1,14 @@
+id: egress-lookalike-registry
+title: Payload targets a domain that reads like the real registry
+chain_link: 5
+ecosystem: npm
+source: constructed
+expect: denied
+requires: policy
+target:
+  host: registry.npmjs.org.attacker.test
+  port: 443
+note: >
+  Exact matching on the full normalised hostname. A suffix that merely contains
+  the registry name is not the registry, and a reviewer skimming an allowlist
+  should not have to notice the difference.

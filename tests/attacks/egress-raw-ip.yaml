@@ -1,0 +1,14 @@
+id: egress-raw-ip
+title: Payload skips DNS and connects to a literal address
+chain_link: 5
+ecosystem: npm
+source: constructed
+expect: denied
+requires: policy
+target:
+  host: 203.0.113.10
+  port: 443
+note: >
+  Hostname policy is meaningless if an address bypasses it. Raw addresses are
+  rejected in every encoding, so an allowlist cannot be sidestepped by not using
+  a name at all.

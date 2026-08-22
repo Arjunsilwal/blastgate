@@ -1,23 +1,28 @@
 """Container lifecycle and the boundary the install runs behind.
 
-This module owns the topology, which is the actual security property. It is
-being built in two parts, and only the first exists today:
+This module owns the topology, which is the actual security property. Two
+parts:
 
 1. What crosses the boundary. Environment filtering and runtime detection are
-   pure functions with no I/O, testable exhaustively without a container
-   runtime. That is this file.
+   pure functions with no I/O, tested exhaustively without a container runtime.
 
-2. The topology itself. Creating the two networks, joining the containers, and
-   mounting the project directory. Not written. It requires a container runtime
-   to build against and, more importantly, to demonstrate, and a control nobody
-   has watched work is a claim rather than a protection.
+2. The topology. Two networks, of which the install container joins only the
+   internal one, and a single bind mount. Demonstrated in tests/test_topology.py
+   against a real runtime, with a control test asserting that a container on the
+   default bridge does reach the network - without it, a runtime with no
+   connectivity at all would make isolation look perfect.
 
-Until part 2 exists, `bh run` refuses. See docs/threat-model.md section 7.
+Still missing: running the proxy as a sidecar on both networks, so the sandbox
+has an allowed route rather than no route. `bh run` therefore still refuses. A
+sandbox with no network at all is a valid security state and the correct
+intermediate one, but it is not yet a working install.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 import re
 import shutil
+import subprocess
 from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 
@@ -232,4 +237,140 @@ def detect_runtime(candidates: Sequence[str] = ("docker", "podman")) -> str:
         "no container runtime found (looked for: "
         + ", ".join(candidates)
         + "). Bulkhead will not run an install outside a sandbox."
+    )
+
+
+# --- Topology -------------------------------------------------------------
+#
+# Two networks. The install container is joined only to the internal one, which
+# has no gateway, so there is no route to the internet for a payload to find.
+# The proxy is the only host reachable from it, and the proxy is the only thing
+# joined to both. This is a property of the topology, not a configuration
+# preference: a payload cannot opt out of policy because there is nothing to
+# opt out to.
+
+INTERNAL_NETWORK = "bulkhead-internal"
+EXTERNAL_NETWORK = "bulkhead-external"
+
+SANDBOX_WORKDIR = "/workspace"
+
+
+@dataclass(frozen=True)
+class SandboxResult:
+    exit_code: int
+    stdout: str
+    stderr: str
+
+
+def _run(argv, timeout: int = 120) -> "subprocess.CompletedProcess":
+    return subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def network_exists(name: str, runtime: str = "docker") -> bool:
+    result = _run([runtime, "network", "inspect", name])
+    return result.returncode == 0
+
+
+def ensure_networks(runtime: str = "docker") -> None:
+    """Create the two networks if they do not exist.
+
+    The internal network is created with --internal, which is what removes the
+    route out. Without that flag this whole design is decoration, so its
+    absence is treated as a failure rather than a warning.
+    """
+    if not network_exists(INTERNAL_NETWORK, runtime):
+        result = _run([runtime, "network", "create", "--internal", INTERNAL_NETWORK])
+        if result.returncode != 0:
+            raise RunnerError(f"failed to create {INTERNAL_NETWORK}: {result.stderr.strip()}")
+
+    if not network_exists(EXTERNAL_NETWORK, runtime):
+        result = _run([runtime, "network", "create", EXTERNAL_NETWORK])
+        if result.returncode != 0:
+            raise RunnerError(f"failed to create {EXTERNAL_NETWORK}: {result.stderr.strip()}")
+
+    assert_network_is_internal(INTERNAL_NETWORK, runtime)
+
+
+def assert_network_is_internal(name: str, runtime: str = "docker") -> None:
+    """Verify the internal network really is internal.
+
+    A network that already existed might have been created without --internal,
+    by an earlier version of this tool or by hand. Trusting the name would mean
+    running an install on a network with a route out while reporting isolation.
+    """
+    result = _run([runtime, "network", "inspect", "--format", "{{.Internal}}", name])
+    if result.returncode != 0:
+        raise RunnerError(f"cannot inspect network {name}: {result.stderr.strip()}")
+    if result.stdout.strip().lower() != "true":
+        raise RunnerError(
+            f"network {name} exists but is not internal. Refusing to run: an "
+            f"install on this network would have a route out. Remove it with "
+            f"`{runtime} network rm {name}` and try again."
+        )
+
+
+def remove_networks(runtime: str = "docker") -> None:
+    for name in (INTERNAL_NETWORK, EXTERNAL_NETWORK):
+        _run([runtime, "network", "rm", name])
+
+
+def run_sandboxed(
+    command: Sequence[str],
+    project_dir: "Path",
+    image: str,
+    runtime: Optional[str] = None,
+    env: Optional[Mapping[str, str]] = None,
+    network: str = INTERNAL_NETWORK,
+    timeout: int = 300,
+) -> SandboxResult:
+    """Run a command in the sandbox.
+
+    The project directory is the only mount. The environment is whatever the
+    caller passes and nothing more - callers are expected to pass the output of
+    strip_environment, and passing os.environ directly would defeat the point.
+    """
+    from pathlib import Path as _Path
+
+    runtime = runtime or detect_runtime()
+    project_dir = _Path(project_dir).resolve()
+    if not project_dir.is_dir():
+        raise RunnerError(f"project directory does not exist: {project_dir}")
+
+    if network == INTERNAL_NETWORK:
+        assert_network_is_internal(network, runtime)
+
+    argv = [
+        runtime, "run", "--rm",
+        "--network", network,
+        # The project directory is the only thing from the host that the
+        # install can see.
+        "--mount", f"type=bind,source={project_dir},target={SANDBOX_WORKDIR}",
+        "--workdir", SANDBOX_WORKDIR,
+        # Reduce what a container escape has to work with. Neither of these is
+        # the isolation boundary; the boundary is the runtime itself.
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+    ]
+
+    for name, value in (env or {}).items():
+        argv += ["--env", f"{name}={value}"]
+
+    argv += [image]
+    argv += list(command)
+
+    try:
+        result = _run(argv, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RunnerError(f"sandboxed command timed out after {timeout}s")
+
+    return SandboxResult(
+        exit_code=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
     )

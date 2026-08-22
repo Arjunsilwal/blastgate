@@ -1,0 +1,16 @@
+id: exfil-over-tls-to-allowlisted-host
+title: Payload writes stolen material to an attacker repo on an allowlisted forge
+chain_link: 5
+ecosystem: npm
+source: constructed
+expect: not_prevented
+requires: proxy
+target:
+  host: github.com
+  port: 443
+note: >
+  A disclosed gap from threat model §8.1, written as an executable fact. With
+  git-dependencies enabled and no TLS interception, the proxy sees an allowed
+  hostname and nothing else. This scenario is expected to succeed for the
+  attacker. It exists so the gap cannot be quietly assumed closed, and so the
+  published pass rate counts it.

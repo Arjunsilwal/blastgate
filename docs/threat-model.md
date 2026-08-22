@@ -14,7 +14,7 @@ wired to any package manager. **Nothing in section 6 constitutes protection of a
 real install today.** See section 7 for the precise gap between design and
 implementation.
 
-Document version: 3. Last reviewed: 2026-08-22.
+Document version: 4. Last reviewed: 2026-08-22.
 
 **Design note, recorded because it departs from the v0 plan.** The plan specified
 environment variables "filtered by shape (prefix, and any name containing TOKEN,
@@ -154,12 +154,16 @@ Assumed *not* available:
 Every row maps to a test that fails when the control is removed. **A control with
 no test is a claim, not a protection, and belongs in section 8 until it has one.**
 
-Every row below is a property of a *pure function*, tested in
-`tests/test_policy.py` and `tests/test_runner.py`. None of them is yet applied to
-a running install, because the container that would apply them does not exist —
-see section 7. Read every row as "the decision is correct", not "the install is
-constrained". Two rows constrain bulkhead's own behaviour rather than an
-attacker's, and are marked.
+Most rows below are properties of *pure functions* — they say the decision is
+correct, not that an install is constrained. The rows marked *(runtime)* are
+different: they are demonstrated against a real container runtime in
+`tests/test_topology.py` and do constrain a running process. Rows marked
+*(constrains bulkhead)* limit this tool's own behaviour rather than an
+attacker's.
+
+The runtime rows depend on a control test asserting that a container on the
+default bridge *does* reach the network. Without it, a runtime with no
+connectivity would satisfy every isolation assertion while proving nothing.
 
 | Claim | Control | Test |
 |---|---|---|
@@ -192,6 +196,14 @@ attacker's, and are marked.
 | An allowlisted host is not reachable on an arbitrary port | Proxy restricts tunnelling to port 443 | `TestEnforcement::test_non_standard_port_refused_on_allowlisted_host` |
 | Plain HTTP through the proxy is refused rather than forwarded | Only CONNECT is accepted; absolute-URI requests are rejected | `TestRequestParsing::test_non_connect_methods_refused` |
 | Every egress decision reaches the log | Proxy records before responding | `TestEnforcement::test_every_decision_is_recorded` |
+| An install in the sandbox has no route to the internet *(runtime)* | Internal network with no gateway | `test_topology.py::TestNoRouteOut::test_sandbox_cannot_reach_the_internet` |
+| Skipping DNS and dialling an address directly does not help *(runtime)* | Same; there is no route regardless of name resolution | `TestNoRouteOut::test_sandbox_cannot_reach_a_raw_address` |
+| The sandbox has no default route at all *(runtime)* | Same | `TestNoRouteOut::test_sandbox_has_no_default_route` |
+| Public DNS does not resolve inside the sandbox *(runtime)* | Same | `TestNoRouteOut::test_sandbox_cannot_resolve_public_dns` |
+| The project directory is the only host mount *(runtime)* | Single bind mount; host home is absent | `TestMountBoundary::test_host_home_is_not_mounted`, `::test_only_one_host_mount_exists` |
+| The container runtime's socket is not exposed to the install *(runtime)* | Not mounted | `TestMountBoundary::test_docker_socket_is_not_mounted` |
+| Host credentials do not appear in the sandbox environment *(runtime)* | Filtered environment passed explicitly | `TestEnvironmentAtTheBoundary::test_host_credentials_do_not_appear_in_the_sandbox` |
+| A network that is not actually internal is refused *(constrains bulkhead)* | Internality is inspected, not inferred from the name | `TestNetworkIntegrity::test_non_internal_network_is_refused` |
 
 Two deliberate properties worth stating because they surprise people:
 
@@ -209,24 +221,24 @@ the control is removed, bulkhead prevents nothing about a real install.
 
 | Control | Module | Status |
 |---|---|---|
-| Isolation: project directory is the only mount | `runner.py` | Not written |
+| Isolation: project directory is the only mount | `runner.py` | **Written and demonstrated** (section 6) |
 | Environment filtering: deciding what may cross | `runner.py` | **Written and tested** (section 6) |
-| Environment filtering: applying that decision to a real container | `runner.py` | Not written |
-| Network topology: install container has no route out | `runner.py` | Not written |
+| Environment filtering: applying that decision to a real container | `runner.py` | **Written and demonstrated** (section 6) |
+| Network topology: install container has no route out | `runner.py` | **Written and demonstrated** (section 6) |
 | Egress enforcement: CONNECT handling and the allow/deny response | `proxy.py` | **Written and tested** (section 6) |
-| Egress enforcement: the proxy being the only route out | `runner.py` | Not written |
+| Egress enforcement: the proxy running as a sidecar on both networks | `runner.py` | Not written |
 | Hash-chained audit log: tamper-evident structure | `audit.py` | **Written and tested** (section 6) |
 | Hash-chained audit log: written where the payload cannot reach it | `runner.py` | Not written |
-| Executable attack scenario corpus | `tests/attacks/` | Not written |
+| Executable attack scenario corpus | `tests/attacks/` | Schema and scenarios written; no executor |
 
-Until then bulkhead is a set of correct answers to questions nothing is asking.
-The environment filter selects the right variables to withhold, and nothing
-consumes its output. The proxy refuses the right destinations, and nothing routes
-an install through it. The audit log is tamper-evident, and it lives wherever the
-caller puts it. Each part is necessary and none is sufficient, because every one
-of them assumes a topology that does not exist yet. The gap between "the decision
-is right" and "the install is constrained" is the whole of the remaining build,
-and it is a single row of this table: the install container having no route out.
+What remains is one connection. The sandbox now has *no* route out, which is a
+valid security state and the correct intermediate one, but it is not a working
+install: everything fails, including the legitimate registry fetch. The proxy
+that would turn "no route" into "one allowed route" exists and is tested, and is
+not yet run as a sidecar joined to both networks.
+
+Until that lands, `bh run` still refuses, and the audit log still lives wherever
+the caller puts it rather than somewhere the payload cannot reach.
 
 Because none of the above exists, `bh run` refuses to execute rather than running
 an install without an enforcement point. This is the fail-closed default from
@@ -269,6 +281,11 @@ to read it and not find a gap that was left undisclosed.
   on hostname alone. The restriction to port 443 lives in the proxy, not in
   policy, so the two disagree when inspected separately. Treat `bh check` as
   answering "is this host allowed", never "is this destination reachable".
+- **The project must live somewhere the runtime can see.** On macOS the
+  container runtime runs inside a VM that shares only part of the host
+  filesystem. A project outside a shared path cannot be mounted and the run
+  fails. This is a usability constraint rather than a weakness, but it means the
+  set of directories bulkhead can protect is smaller than "any directory".
 - **Refusing plain HTTP may break real installs.** The proxy accepts only
   CONNECT. A package manager or mirror that falls back to unencrypted HTTP will
   fail rather than be forwarded. This is fail-closed and deliberate, and it is a
