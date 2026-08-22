@@ -144,9 +144,11 @@ Assumed *not* available:
 Every row maps to a test that fails when the control is removed. **A control with
 no test is a claim, not a protection, and belongs in section 8 until it has one.**
 
-All rows below are properties of the policy engine, tested in
-`tests/test_policy.py`. They describe what the *decision function* does, not what
-is enforced against a running install — see section 7.
+All rows below are tested in `tests/test_policy.py`. With one exception they are
+properties of the policy engine: they describe what the *decision function* does,
+not what is enforced against a running install — see section 7. The exception is
+the final row, which is a property of the CLI and is the only row that constrains
+bulkhead's own behaviour rather than an attacker's.
 
 | Claim | Control | Test |
 |---|---|---|
@@ -163,6 +165,7 @@ is enforced against a running install — see section 7.
 | A host commonly needed but usable for exfiltration is denied unless opted into | Conditional tier, off by default | `TestConditionalRules::test_conditional_denied_by_default` |
 | Enabling one condition does not enable another | Conditions matched by name | `TestConditionalRules::test_conditional_denied_when_different_condition_enabled` |
 | An allowlist entry without a stated reason is rejected at load | Schema validation | `TestPolicySchemaAndLoading::test_rule_without_reason_raises` |
+| `bh run` never executes an install while no enforcement point exists | Fail-closed refusal; no execution path in the CLI | `TestCliRun::test_run_refuses_and_never_executes`, `::test_run_refuses_for_every_ecosystem` |
 
 Two deliberate properties worth stating because they surprise people:
 
@@ -188,6 +191,15 @@ the control is removed, bulkhead prevents nothing about a real install.
 | Executable attack scenario corpus | `tests/attacks/` | Not written |
 
 Until then the policy engine is a correct answer to a question nothing is asking.
+
+Because none of the above exists, `bh run` refuses to execute rather than running
+an install without an enforcement point. This is the fail-closed default from
+section 8.3, applied to the tool's own incompleteness: a sandbox that is not
+built and a container runtime that is unavailable are the same condition, and
+both must refuse rather than degrade. The refusal is a property of bulkhead, not
+a protection against an attacker — it prevents a user from being misled into
+relying on an enforcement point that does not exist. It stops nothing that a
+malicious package does.
 
 ## 8. What is NOT defended against
 
@@ -244,7 +256,8 @@ to read it and not find a gap that was left undisclosed.
   is ever added it will be opt-in. A tool that decrypts a developer's traffic by
   default does not deserve trust.
 - Bulkhead never falls back to unsandboxed execution. If the container runtime is
-  unavailable, it fails closed and refuses to run.
+  unavailable — or if, as today, the sandbox is not yet built — it fails closed
+  and refuses to run. This is enforced in code and tested, not merely intended.
 
 ## 9. Residual risk if every phase ships as designed
 

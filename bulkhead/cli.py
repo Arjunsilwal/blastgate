@@ -1,6 +1,9 @@
 """Bulkhead CLI interface.
 
-Phase 1 implements only the 'check' subcommand.
+Phase 1 implements the 'check' subcommand. 'run' exists but refuses: there is no
+enforcement point yet, and running an install without one would provide no
+protection while appearing to. Failing closed is the correct behaviour, and it
+stays correct when the container runtime is simply unavailable.
 """
 
 import argparse
@@ -44,7 +47,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Custom path to directory containing allowlist YAML files",
     )
 
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Run an install inside the sandbox (refuses: no enforcement point yet)",
+    )
+    run_parser.add_argument(
+        "ecosystem",
+        help="Target ecosystem (e.g. npm, pypi, cargo)",
+    )
+    run_parser.add_argument(
+        "argv",
+        nargs=argparse.REMAINDER,
+        help="Install command to run inside the sandbox",
+    )
+
     return parser
+
+
+REFUSAL = (
+    "bh: refusing to run. Isolation and egress enforcement are not implemented "
+    "(Phase 2 and 3).\n"
+    "    Running an install without an enforcement point would provide no "
+    "protection.\n"
+    "    See docs/threat-model.md section 7.\n"
+)
 
 
 def main(args: Optional[List[str]] = None) -> int:
@@ -56,6 +82,13 @@ def main(args: Optional[List[str]] = None) -> int:
         parsed_args = parser.parse_args(args)
     except SystemExit as e:
         return 2 if e.code != 0 else 0
+
+    if parsed_args.command == "run":
+        # Deliberate fail-closed default. Never fall back to unsandboxed
+        # execution: no execution path may be added here before the enforcement
+        # point exists. See docs/threat-model.md section 6.
+        sys.stderr.write(REFUSAL)
+        return 2
 
     if parsed_args.command == "check":
         try:

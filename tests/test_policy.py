@@ -382,3 +382,52 @@ class TestCliCheck:
         assert rc == 2
         captured = capsys.readouterr()
         assert "Error" in captured.err or "Error" in captured.out
+
+
+class TestCliRun:
+    """`bh run` must refuse rather than run without an enforcement point.
+
+    These tests fail if an execution path is ever added to the run command
+    before isolation and egress enforcement exist.
+    """
+
+    @pytest.fixture
+    def no_execution_allowed(self, monkeypatch):
+        """Make any attempt to execute a subprocess a test failure."""
+        import os
+        import subprocess
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("bh run attempted to execute a command")
+
+        for target, name in (
+            (subprocess, "run"),
+            (subprocess, "call"),
+            (subprocess, "check_call"),
+            (subprocess, "check_output"),
+            (subprocess, "Popen"),
+            (os, "system"),
+            (os, "execvp"),
+            (os, "execv"),
+            (os, "posix_spawn"),
+            (os, "fork"),
+        ):
+            monkeypatch.setattr(target, name, forbidden)
+
+    def test_run_refuses_and_never_executes(self, no_execution_allowed, capsys):
+        exit_code = cli_main(["run", "npm", "install"])
+        captured = capsys.readouterr()
+        assert exit_code == 2
+        assert "refusing to run" in captured.err
+        assert captured.out == ""
+
+    def test_run_refuses_for_every_ecosystem(self, no_execution_allowed):
+        for ecosystem in ("npm", "pypi", "cargo"):
+            assert cli_main(["run", ecosystem, "install"]) == 2
+
+    def test_run_refuses_with_no_install_arguments(self, no_execution_allowed):
+        assert cli_main(["run", "npm"]) == 2
+
+    def test_run_refusal_cites_the_threat_model(self, no_execution_allowed, capsys):
+        cli_main(["run", "npm", "install"])
+        assert "threat-model.md" in capsys.readouterr().err
