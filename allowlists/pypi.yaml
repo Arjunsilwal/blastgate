@@ -1,0 +1,29 @@
+ecosystem: pypi
+version: 1
+
+exact:
+  - host: pypi.org
+    reason: "Primary Python Package Index metadata"
+  - host: files.pythonhosted.org
+    reason: "Python package wheels and source tarball distributions"
+
+wildcard:
+  - pattern: "*.pythonhosted.org"
+    reason: "Python package distribution CDN endpoints"
+
+conditional:
+  - host: github.com
+    condition: git-dependencies
+    reason: "Direct git repository dependencies and release assets"
+  - host: raw.githubusercontent.com
+    condition: git-dependencies
+    reason: "Raw repository file dependencies"
+  - host: codeload.github.com
+    condition: git-dependencies
+    reason: "GitHub repository archive downloads"
+  - host: gitlab.com
+    condition: git-dependencies
+    reason: "GitLab repository dependencies"
+  - host: bitbucket.org
+    condition: git-dependencies
+    reason: "Bitbucket repository dependencies"

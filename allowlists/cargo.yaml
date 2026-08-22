@@ -1,0 +1,31 @@
+ecosystem: cargo
+version: 1
+
+exact:
+  - host: crates.io
+    reason: "Primary Rust crate registry metadata index"
+  - host: index.crates.io
+    reason: "Sparse index service for crates.io"
+  - host: static.crates.io
+    reason: "Static download CDN for crate archives"
+
+wildcard:
+  - pattern: "*.crates.io"
+    reason: "Crates.io registry and CDN endpoints"
+
+conditional:
+  - host: github.com
+    condition: git-dependencies
+    reason: "Direct git repository dependencies and release assets"
+  - host: raw.githubusercontent.com
+    condition: git-dependencies
+    reason: "Raw repository file dependencies"
+  - host: codeload.github.com
+    condition: git-dependencies
+    reason: "GitHub repository archive downloads"
+  - host: gitlab.com
+    condition: git-dependencies
+    reason: "GitLab repository dependencies"
+  - host: bitbucket.org
+    condition: git-dependencies
+    reason: "Bitbucket repository dependencies"

@@ -1,0 +1,29 @@
+ecosystem: npm
+version: 1
+
+exact:
+  - host: registry.npmjs.org
+    reason: "Primary package registry metadata and tarball host"
+  - host: registry.yarnpkg.com
+    reason: "Official Yarn registry mirror"
+
+wildcard:
+  - pattern: "*.npmjs.org"
+    reason: "Registry CDN edge nodes and asset endpoints"
+
+conditional:
+  - host: github.com
+    condition: git-dependencies
+    reason: "Direct git repository dependencies and GitHub release assets"
+  - host: raw.githubusercontent.com
+    condition: git-dependencies
+    reason: "Raw repository file dependencies"
+  - host: codeload.github.com
+    condition: git-dependencies
+    reason: "GitHub repository archive downloads"
+  - host: gitlab.com
+    condition: git-dependencies
+    reason: "GitLab repository dependencies"
+  - host: bitbucket.org
+    condition: git-dependencies
+    reason: "Bitbucket repository dependencies"
