@@ -183,6 +183,10 @@ attacker's, and are marked.
 | Registry-redirection variables are not inherited into the sandbox | Withheld by default | `TestDefaultDeny::test_registry_redirection_is_not_inherited` |
 | A user cannot forward a credential-shaped variable into the sandbox *(constrains bulkhead)* | Second-layer shape check; fails closed on explicit request | `TestExplicitForwarding::test_forwarding_a_credential_fails_closed` |
 | An absent container runtime is a refusal, not a degraded mode *(constrains bulkhead)* | `detect_runtime` raises rather than returning a falsy value | `TestRuntimeDetection::test_missing_runtime_raises_rather_than_returning_none` |
+| A denial cannot be edited into an allow without detection | Hash-chained audit entries | `test_audit.py::TestTamperDetection::test_flipping_a_denial_to_an_allow_is_detected` |
+| An audit entry cannot be removed, reordered, or forged into the middle without detection | Each entry commits to its predecessor's hash | `TestTamperDetection::test_removing_a_middle_entry_is_detected`, `::test_reordering_entries_is_detected`, `::test_splicing_a_forged_entry_is_detected` |
+| Fixing an edited entry's own hash does not repair the chain | Later entries still commit to the original hash | `TestTamperDetection::test_recomputing_the_hash_after_editing_is_still_detected` |
+| Appending to an already-broken log is refused | Tail is verified before extension | `TestTamperDetection::test_appending_to_a_tampered_log_is_refused` |
 
 Two deliberate properties worth stating because they surprise people:
 
@@ -205,7 +209,8 @@ the control is removed, bulkhead prevents nothing about a real install.
 | Environment filtering: applying that decision to a real container | `runner.py` | Not written |
 | Network topology: install container has no route out | `runner.py` | Not written |
 | Egress enforcement at the proxy | `proxy.py` | Not written |
-| Hash-chained audit log | `audit.py` | Not written |
+| Hash-chained audit log: tamper-evident structure | `audit.py` | **Written and tested** (section 6) |
+| Hash-chained audit log: written where the payload cannot reach it | `runner.py` | Not written |
 | Executable attack scenario corpus | `tests/attacks/` | Not written |
 
 Until then bulkhead is a set of correct answers to questions nothing is asking.
@@ -265,6 +270,15 @@ to read it and not find a gap that was left undisclosed.
 - **Unicode and IDN hostnames are rejected outright**, not punycode-normalized.
   This is fail-closed and may produce false negatives on legitimate
   internationalized hosts.
+- **Audit truncation is not detected.** Removing the most recent entries leaves
+  a shorter chain that still verifies. Detecting this requires anchoring the head
+  somewhere the writer cannot reach, which bulkhead does not do. Asserted
+  explicitly in `TestDisclosedLimits::test_truncating_the_tail_is_NOT_detected`
+  so the limit cannot be quietly assumed closed.
+- **The audit log proves consistency, not provenance.** An attacker who can write
+  the file can replace it wholesale with a valid chain of their own. The chain is
+  only meaningful while the log lives somewhere the install container cannot
+  reach, which depends on the topology and is not built.
 - **The environment filter is blind to values.** It decides by variable *name*
   only. A secret stored under a name like `BUILD_NUMBER` is not recognised as a
   secret, and would be forwarded if the user asked for it by name. Shape

@@ -11,6 +11,7 @@ from pathlib import Path
 import sys
 from typing import List, Optional
 
+from bulkhead.audit import AuditError, AuditLog, TamperError
 from bulkhead.policy import PolicyError, load_policy
 
 
@@ -61,6 +62,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install command to run inside the sandbox",
     )
 
+    audit_parser = subparsers.add_parser(
+        "audit",
+        help="Review logged egress decisions and verify the log has not been altered",
+    )
+    audit_parser.add_argument(
+        "path",
+        type=Path,
+        help="Path to the audit log",
+    )
+    audit_parser.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="Check the chain and print nothing but the verdict",
+    )
+
     return parser
 
 
@@ -89,6 +105,32 @@ def main(args: Optional[List[str]] = None) -> int:
         # point exists. See docs/threat-model.md section 6.
         sys.stderr.write(REFUSAL)
         return 2
+
+    if parsed_args.command == "audit":
+        log = AuditLog(parsed_args.path)
+        try:
+            entries = log.read_all()
+            log.verify(entries)
+        except TamperError as e:
+            # Loud by design. A log that does not verify is the one output
+            # nobody should be able to overlook.
+            sys.stderr.write(f"TAMPERED: {e}\n")
+            return 1
+        except AuditError as e:
+            sys.stderr.write(f"Error: {e}\n")
+            return 2
+
+        if not parsed_args.verify_only:
+            for entry in entries:
+                verdict = "ALLOW" if entry.allowed else "DENY "
+                rule = entry.rule or "-"
+                sys.stdout.write(
+                    f"{entry.seq:>5}  {entry.timestamp}  {verdict}  "
+                    f"{entry.host}  ({rule})\n"
+                )
+
+        sys.stdout.write(f"OK: chain verified, {len(entries)} entries\n")
+        return 0
 
     if parsed_args.command == "check":
         try:
