@@ -1,0 +1,65 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+sdist/
+wheels/
+*.egg-info/
+*.egg
+.eggs/
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test and coverage artifacts
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.cache/
+
+# Type checkers and linters
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.dmypy.json
+
+# Secrets and local configuration.
+# A supply chain tool must never ship a credential in its own history.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.yaml
+
+# Bulkhead runtime output.
+# Audit logs record real hostnames from real installs and are local artifacts,
+# not repository content.
+*.log
+audit.log
+.bulkhead/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
