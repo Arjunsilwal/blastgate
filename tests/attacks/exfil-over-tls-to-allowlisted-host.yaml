@@ -5,6 +5,9 @@ ecosystem: npm
 source: constructed
 expect: not_prevented
 requires: proxy
+enable:
+  - git-dependencies
+
 target:
   host: github.com
   port: 443

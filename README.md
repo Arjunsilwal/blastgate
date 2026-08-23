@@ -46,12 +46,41 @@ is yes and constrains what that can accomplish.
 | 1 | Policy engine — allowlist load, host matching, allow/deny | Working |
 | 2 | Isolation — container topology, credential stripping | Working |
 | 3 | Enforcement — egress proxy, hash-chained audit log | Working |
-| 4 | Executable attack corpus | Scenarios written, no executor |
+| 4 | Executable attack corpus | Working |
 
-Phase 4 is the honest remainder. `tests/attacks/` holds the scenario format and
-eight scenarios, one of which asserts a *disclosed gap is not prevented*. There
-is no executor yet, so there is no published pass rate, and a pass rate nobody
-has computed is not a claim worth making.
+## What the attack corpus scores
+
+`tests/attacks/` holds executable scenarios. Each one is run against the real
+sandbox and scored, and the number below is regenerated from that run rather
+than written by hand:
+
+```bash
+python scripts/attack_report.py --write
+```
+
+<!-- corpus:begin -->
+**7 of 8 scenarios prevented (88%).**
+
+| Scenario | Link | Expected | Result |
+| --- | --- | --- | --- |
+| `egress-forge-without-opt-in` | 5 | denied | prevented |
+| `egress-lookalike-registry` | 5 | denied | prevented |
+| `egress-nonstandard-port` | 5 | denied | prevented |
+| `egress-raw-ip` | 5 | denied | prevented |
+| `egress-unlisted-host` | 5 | denied | prevented |
+| `exfil-over-tls-to-allowlisted-host` | 5 | not_prevented | known-gap ⚠ |
+| `harvest-host-credential-files` | 4 | denied | prevented |
+| `registry-traffic-still-works` | 0 | allowed | allowed |
+
+Counted as failures because they are:
+- `exfil-over-tls-to-allowlisted-host` — Payload writes stolen material to an attacker repo on an allowlisted forge
+<!-- corpus:end -->
+
+The rate counts a disclosed gap as a failure, because it is one. It counts a
+scenario that could not run as a failure too. A corpus that only tallies the
+cases it wins produces a nicer number and a worse tool. A test in
+`tests/test_attacks.py` fails if this README stops matching what the corpus
+actually scores.
 
 ## What actually stops a payload
 
