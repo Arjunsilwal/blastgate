@@ -1,10 +1,11 @@
 # bulkhead
 
-> **Status: pre-alpha, Phase 1 of 4. Do not rely on this for protection yet.**
-> The policy engine works. Isolation and egress enforcement are not built.
-> `bh run` refuses to execute rather than running without an enforcement point.
-> See [docs/threat-model.md](docs/threat-model.md) for what this will and will
-> not defend against.
+> **Status: pre-alpha. Every control in the design is built and demonstrated
+> against running containers, and the known gaps have not shrunk.** A real
+> `npm install` completes inside the sandbox with one allowed route out. It has
+> not been run against a live worm, and it does not stop a payload that exfils
+> through a host you allowlisted — read
+> [docs/threat-model.md](docs/threat-model.md) section 8 before relying on it.
 
 Run package installs with no credentials available and no network egress except
 an explicit allowlist.
@@ -44,17 +45,58 @@ is yes and constrains what that can accomplish.
 | 0 | Threat model | [Written](docs/threat-model.md) |
 | 1 | Policy engine — allowlist load, host matching, allow/deny | Working |
 | 2 | Isolation — container topology, credential stripping | Working |
-| 3 | Enforcement — egress proxy, hash-chained audit log | Built, not yet wired in |
+| 3 | Enforcement — egress proxy, hash-chained audit log | Working |
 | 4 | Executable attack corpus | Scenarios written, no executor |
 
-One connection is missing, and it is the one that makes the tool usable. The
-sandbox currently has *no* route out rather than one allowed route, so a real
-install fails inside it — every fetch is blocked, including the legitimate ones.
-The proxy that turns "no route" into "one allowed route" is written and tested
-but is not yet run as a sidecar. That is why `bh run` still refuses.
+Phase 4 is the honest remainder. `tests/attacks/` holds the scenario format and
+eight scenarios, one of which asserts a *disclosed gap is not prevented*. There
+is no executor yet, so there is no published pass rate, and a pass rate nobody
+has computed is not a claim worth making.
 
-A sandbox with no network is a valid security state and the correct intermediate
-one. It is not a working install, and the banner above stays until it is.
+## What actually stops a payload
+
+The proxy environment variables are configuration, and a payload has no reason
+to honour configuration. They are not the control.
+
+The control is that the install container is joined to a network with no
+gateway. The only host it can open a socket to is the proxy, and the proxy is
+the only container joined to both networks. A payload that ignores
+`HTTPS_PROXY` entirely and dials `registry.npmjs.org:443` directly finds no
+route to it. That difference — a setting versus a topology — is the one the
+tests are built around:
+
+```
+tests/test_end_to_end.py::TestTheWholeThing::test_a_payload_that_ignores_the_proxy_is_still_blocked
+```
+
+The audit log is written to a directory mounted into the proxy container and
+nowhere else, so the sandbox cannot read or delete it. Pointing `--audit` inside
+the project directory is refused, because the project is mounted writable and a
+log the payload can rewrite is not evidence.
+
+## Run an install
+
+Requires Docker or Podman.
+
+```bash
+bh run npm -- npm ci
+```
+
+The install command goes after `--`. Bulkhead's own options go before it:
+
+```bash
+bh run npm --project ./app --allow git-dependencies -- npm install
+```
+
+Then review what it tried to reach:
+
+```bash
+bh audit ~/.bulkhead/audit/<project>-<hash>.log
+```
+
+Every failure path refuses rather than falling back. A missing runtime, a
+network that is not actually internal, or a sidecar that does not come up all
+produce a refusal, never an unsandboxed install.
 
 ## Try the policy engine
 

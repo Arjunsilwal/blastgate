@@ -385,10 +385,11 @@ class TestCliCheck:
 
 
 class TestCliRun:
-    """`bh run` must refuse rather than run without an enforcement point.
+    """`bh run` must never fall back to an unsandboxed install.
 
-    These tests fail if an execution path is ever added to the run command
-    before isolation and egress enforcement exist.
+    It now has a real execution path, so the question is no longer "does it
+    refuse" but "does it refuse on every path where the enforcement point is
+    not in place". These tests fail if a fallback is ever added.
     """
 
     @pytest.fixture
@@ -414,20 +415,45 @@ class TestCliRun:
         ):
             monkeypatch.setattr(target, name, forbidden)
 
-    def test_run_refuses_and_never_executes(self, no_execution_allowed, capsys):
-        exit_code = cli_main(["run", "npm", "install"])
-        captured = capsys.readouterr()
-        assert exit_code == 2
-        assert "refusing to run" in captured.err
-        assert captured.out == ""
-
-    def test_run_refuses_for_every_ecosystem(self, no_execution_allowed):
-        for ecosystem in ("npm", "pypi", "cargo"):
-            assert cli_main(["run", ecosystem, "install"]) == 2
-
     def test_run_refuses_with_no_install_arguments(self, no_execution_allowed):
         assert cli_main(["run", "npm"]) == 2
 
-    def test_run_refusal_cites_the_threat_model(self, no_execution_allowed, capsys):
-        cli_main(["run", "npm", "install"])
-        assert "threat-model.md" in capsys.readouterr().err
+    def test_bulkhead_options_are_not_swallowed_into_the_command(self, no_execution_allowed, tmp_path, capsys):
+        # argparse.REMAINDER would absorb --audit into the install command, so
+        # the flag would be silently ignored instead of honoured. Here it is
+        # parsed, the guard sees the bad path, and the run is refused.
+        cli_main([
+            "run", "npm", "--project", str(tmp_path),
+            "--audit", str(tmp_path / "audit.log"), "--", "npm", "ci",
+        ])
+        assert "payload could rewrite it" in capsys.readouterr().err
+
+    def test_run_refuses_when_no_runtime_is_available(self, no_execution_allowed, monkeypatch, capsys):
+        # The original reason bh run refused. A missing runtime must still be a
+        # refusal and never a local install.
+        monkeypatch.setattr("bulkhead.runner.shutil.which", lambda name: None)
+        exit_code = cli_main(["run", "npm", "--", "npm", "ci"])
+        assert exit_code == 2
+        assert "refusing to run" in capsys.readouterr().err
+
+    def test_run_refuses_an_audit_log_inside_the_project(self, no_execution_allowed, tmp_path, capsys):
+        # The project directory is mounted writable into the sandbox, so a log
+        # there is one the payload can rewrite. Caught before anything executes.
+        exit_code = cli_main([
+            "run", "npm", "--project", str(tmp_path),
+            "--audit", str(tmp_path / "nested" / "audit.log"),
+            "--", "npm", "ci",
+        ])
+        assert exit_code == 2
+        err = capsys.readouterr().err
+        assert "refusing to run" in err
+        assert "payload could rewrite it" in err
+
+    def test_run_refuses_an_unknown_ecosystem(self, no_execution_allowed, capsys):
+        assert cli_main(["run", "nosuchecosystem", "--", "npm", "ci"]) == 2
+
+    def test_default_audit_path_is_outside_the_project(self, tmp_path):
+        from bulkhead.runner import assert_audit_log_unreachable, default_audit_path
+
+        # The default must satisfy the guard rather than trip it.
+        assert_audit_log_unreachable(default_audit_path(tmp_path), tmp_path)

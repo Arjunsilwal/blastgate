@@ -13,6 +13,7 @@ hidden here.
 """
 
 import asyncio
+from pathlib import Path
 from dataclasses import dataclass
 import re
 from typing import Optional, Set, Tuple
@@ -273,3 +274,38 @@ class EgressProxy:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+
+    async def serve_forever(self) -> None:
+        """Run until cancelled. The entrypoint when the proxy is a sidecar."""
+        if self._server is None:
+            await self.start()
+        async with self._server:
+            await self._server.serve_forever()
+
+
+def run_proxy_server(
+    policy: Policy,
+    port: int,
+    audit_path: Optional["Path"] = None,
+    enabled_conditions: Optional[Set[str]] = None,
+    host: str = "0.0.0.0",
+) -> None:
+    """Blocking entrypoint used inside the proxy container.
+
+    Binds 0.0.0.0 because the clients are other containers, not this one. That
+    is only safe because of where this runs: the proxy sits on an internal
+    network whose sole other member is the install container. Running it this
+    way anywhere else would expose an open proxy.
+    """
+    audit_log = AuditLog(audit_path) if audit_path is not None else None
+    proxy = EgressProxy(
+        policy,
+        audit_log=audit_log,
+        enabled_conditions=enabled_conditions,
+        host=host,
+        port=port,
+    )
+    try:
+        asyncio.run(proxy.serve_forever())
+    except KeyboardInterrupt:
+        pass

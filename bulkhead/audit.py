@@ -20,7 +20,8 @@ What it does not detect on its own:
 
 Neither limit is closed by writing more code here. Both are closed by the log
 living somewhere the install container cannot reach, which is a property of the
-topology and is not yet built.
+topology: the audit directory is mounted into the proxy container and nowhere
+else, so the sandbox can neither read nor delete it.
 """
 
 from dataclasses import asdict, dataclass

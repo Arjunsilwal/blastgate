@@ -14,7 +14,7 @@ wired to any package manager. **Nothing in section 6 constitutes protection of a
 real install today.** See section 7 for the precise gap between design and
 implementation.
 
-Document version: 4. Last reviewed: 2026-08-22.
+Document version: 5. Last reviewed: 2026-08-22.
 
 **Design note, recorded because it departs from the v0 plan.** The plan specified
 environment variables "filtered by shape (prefix, and any name containing TOKEN,
@@ -180,7 +180,8 @@ connectivity would satisfy every isolation assertion while proving nothing.
 | A host commonly needed but usable for exfiltration is denied unless opted into | Conditional tier, off by default | `TestConditionalRules::test_conditional_denied_by_default` |
 | Enabling one condition does not enable another | Conditions matched by name | `TestConditionalRules::test_conditional_denied_when_different_condition_enabled` |
 | An allowlist entry without a stated reason is rejected at load | Schema validation | `TestPolicySchemaAndLoading::test_rule_without_reason_raises` |
-| `bh run` never executes an install while no enforcement point exists *(constrains bulkhead)* | Fail-closed refusal; no execution path in the CLI | `TestCliRun::test_run_refuses_and_never_executes`, `::test_run_refuses_for_every_ecosystem` |
+| `bh run` never falls back to an unsandboxed install *(constrains bulkhead)* | Every error path refuses; no fallback branch in the CLI | `TestCliRun::test_run_refuses_when_no_runtime_is_available`, `::test_run_refuses_an_audit_log_inside_the_project` |
+| Bulkhead's own options are not swallowed into the install command *(constrains bulkhead)* | `--` split before argparse; REMAINDER would silently drop `--audit` | `TestCliRun::test_bulkhead_options_are_not_swallowed_into_the_command` |
 | A host environment variable does not reach the sandbox unless it was named | Default-deny allowlist over variable names | `test_runner.py::TestDefaultDeny::test_unknown_variable_is_withheld`, `::test_variable_invented_tomorrow_is_withheld` |
 | A credential variable from a real registry campaign does not reach the sandbox | Same allowlist; 24 real names asserted | `TestDefaultDeny::test_real_credential_names_are_withheld` |
 | Host proxy settings are not inherited into the sandbox | Withheld by default; bulkhead sets its own | `TestDefaultDeny::test_proxy_settings_are_not_inherited` |
@@ -204,6 +205,13 @@ connectivity would satisfy every isolation assertion while proving nothing.
 | The container runtime's socket is not exposed to the install *(runtime)* | Not mounted | `TestMountBoundary::test_docker_socket_is_not_mounted` |
 | Host credentials do not appear in the sandbox environment *(runtime)* | Filtered environment passed explicitly | `TestEnvironmentAtTheBoundary::test_host_credentials_do_not_appear_in_the_sandbox` |
 | A network that is not actually internal is refused *(constrains bulkhead)* | Internality is inspected, not inferred from the name | `TestNetworkIntegrity::test_non_internal_network_is_refused` |
+| An allowlisted host is reachable through the proxy *(runtime)* | Sidecar joined to both networks | `test_end_to_end.py::TestTheWholeThing::test_an_allowlisted_host_is_reachable_through_the_proxy` |
+| A denied host is not reachable from a real install *(runtime)* | Policy enforced at the proxy | `TestTheWholeThing::test_a_denied_host_is_not_reachable` |
+| A payload that ignores the proxy variables is still blocked *(runtime)* | Topology, not configuration: there is no route to find | `TestTheWholeThing::test_a_payload_that_ignores_the_proxy_is_still_blocked` |
+| The proxy is the only host the sandbox can open a socket to *(runtime)* | Internal network membership | `TestTheWholeThing::test_the_proxy_is_the_only_host_reachable` |
+| The audit log is not visible from inside the sandbox *(runtime)* | Audit directory mounted into the proxy container only | `TestTheAuditLog::test_the_sandbox_cannot_see_the_log` |
+| An audit log inside the project directory is refused *(constrains bulkhead)* | The project is mounted writable; a log there is one the payload can rewrite | `TestTheAuditLog::test_a_log_inside_the_project_is_refused` |
+| A real `npm install` completes inside the sandbox *(runtime)* | Whole path end to end | `TestARealInstall::test_npm_install_succeeds_inside_the_sandbox` |
 
 Two deliberate properties worth stating because they surprise people:
 
@@ -226,19 +234,20 @@ the control is removed, bulkhead prevents nothing about a real install.
 | Environment filtering: applying that decision to a real container | `runner.py` | **Written and demonstrated** (section 6) |
 | Network topology: install container has no route out | `runner.py` | **Written and demonstrated** (section 6) |
 | Egress enforcement: CONNECT handling and the allow/deny response | `proxy.py` | **Written and tested** (section 6) |
-| Egress enforcement: the proxy running as a sidecar on both networks | `runner.py` | Not written |
+| Egress enforcement: the proxy running as a sidecar on both networks | `runner.py` | **Written and demonstrated** (section 6) |
 | Hash-chained audit log: tamper-evident structure | `audit.py` | **Written and tested** (section 6) |
-| Hash-chained audit log: written where the payload cannot reach it | `runner.py` | Not written |
+| Hash-chained audit log: written where the payload cannot reach it | `runner.py` | **Written and demonstrated** (section 6) |
 | Executable attack scenario corpus | `tests/attacks/` | Schema and scenarios written; no executor |
 
-What remains is one connection. The sandbox now has *no* route out, which is a
-valid security state and the correct intermediate one, but it is not a working
-install: everything fails, including the legitimate registry fetch. The proxy
-that would turn "no route" into "one allowed route" exists and is tested, and is
-not yet run as a sidecar joined to both networks.
+Every control in the design is now built and demonstrated against a running
+install. `bh run` executes rather than refuses, and a real `npm install`
+completes inside the sandbox with one allowed route out.
 
-Until that lands, `bh run` still refuses, and the audit log still lives wherever
-the caller puts it rather than somewhere the payload cannot reach.
+That is not the same as the tool being finished, and section 8 has not shrunk.
+The controls that exist work; the gaps listed there are gaps in what the design
+attempts, not in what it implements. The corpus in `tests/attacks/` is still
+declarative — the scenarios are written and the executor that runs them is not,
+so no published pass rate exists yet.
 
 Because none of the above exists, `bh run` refuses to execute rather than running
 an install without an enforcement point. This is the fail-closed default from
@@ -333,7 +342,8 @@ to read it and not find a gap that was left undisclosed.
   is ever added it will be opt-in. A tool that decrypts a developer's traffic by
   default does not deserve trust.
 - Bulkhead never falls back to unsandboxed execution. If the container runtime is
-  unavailable — or if, as today, the sandbox is not yet built — it fails closed
+  unavailable, if the network is not actually internal, or if the sidecar does
+  not come up, it fails closed
   and refuses to run. This is enforced in code and tested, not merely intended.
 
 ## 9. Residual risk if every phase ships as designed

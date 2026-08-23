@@ -1,9 +1,14 @@
 """Bulkhead CLI interface.
 
-Phase 1 implements the 'check' subcommand. 'run' exists but refuses: there is no
-enforcement point yet, and running an install without one would provide no
-protection while appearing to. Failing closed is the correct behaviour, and it
-stays correct when the container runtime is simply unavailable.
+Four subcommands. 'check' evaluates a host against a policy without running
+anything. 'run' performs an install inside the sandbox. 'audit' reviews and
+verifies the log. 'proxy' runs the enforcement point in the foreground and
+exists for the sidecar container to invoke; it is not normally typed by hand.
+
+'run' still fails closed on every error path. If the runtime is missing, if the
+network is not actually internal, or if the sidecar does not come up, it refuses
+rather than falling back to an unsandboxed install. There is no code path here
+that runs a command outside the sandbox.
 """
 
 import argparse
@@ -13,6 +18,8 @@ from typing import List, Optional
 
 from bulkhead.audit import AuditError, AuditLog, TamperError
 from bulkhead.policy import PolicyError, load_policy
+from bulkhead.proxy import run_proxy_server
+from bulkhead.runner import RunnerError, default_audit_path, run_install
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -50,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser(
         "run",
-        help="Run an install inside the sandbox (refuses: no enforcement point yet)",
+        help="Run an install inside the sandbox with the proxy as its only route out",
     )
     run_parser.add_argument(
         "ecosystem",
@@ -58,9 +65,65 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument(
         "argv",
-        nargs=argparse.REMAINDER,
-        help="Install command to run inside the sandbox",
+        nargs="*",
+        metavar="COMMAND",
+        help="Install command to run inside the sandbox, after a '--' separator "
+             "(e.g. bh run npm -- npm ci). REMAINDER is deliberately not used "
+             "here: it silently swallows bulkhead's own options into the "
+             "command, so --project and --audit would be ignored rather than "
+             "rejected.",
     )
+    run_parser.add_argument(
+        "--project",
+        type=Path,
+        default=None,
+        help="Project directory to mount (default: current directory)",
+    )
+    run_parser.add_argument(
+        "--image",
+        default=None,
+        help="Image to run the install in (default: chosen per ecosystem)",
+    )
+    run_parser.add_argument(
+        "--audit",
+        type=Path,
+        default=None,
+        help="Where to write the audit log (default: .bulkhead/audit.log)",
+    )
+    run_parser.add_argument(
+        "--allow",
+        action="append",
+        dest="allowed_conditions",
+        default=[],
+        help="Explicitly enable a condition (e.g. --allow git-dependencies)",
+    )
+    run_parser.add_argument("--allowlists-dir", type=Path, default=None)
+
+    proxy_parser = subparsers.add_parser(
+        "proxy",
+        help="Run the egress proxy in the foreground (used inside the sidecar container)",
+    )
+    proxy_parser.add_argument("ecosystem", help="Target ecosystem (e.g. npm, pypi, cargo)")
+    proxy_parser.add_argument(
+        "--port", type=int, default=3128, help="Port to listen on (default: 3128)"
+    )
+    proxy_parser.add_argument(
+        "--bind",
+        default="0.0.0.0",
+        help="Address to bind. The default is only safe on an internal network "
+             "whose only other member is the install container.",
+    )
+    proxy_parser.add_argument(
+        "--audit", type=Path, default=None, help="Path to write the audit log"
+    )
+    proxy_parser.add_argument(
+        "--allow",
+        action="append",
+        dest="allowed_conditions",
+        default=[],
+        help="Explicitly enable a condition (e.g. --allow git-dependencies)",
+    )
+    proxy_parser.add_argument("--allowlists-dir", type=Path, default=None)
 
     audit_parser = subparsers.add_parser(
         "audit",
@@ -89,9 +152,25 @@ REFUSAL = (
 )
 
 
+def split_on_separator(args: List[str]) -> "tuple[List[str], List[str]]":
+    """Split bulkhead's own arguments from the command to run in the sandbox.
+
+    Done before argparse rather than with argparse.REMAINDER. REMAINDER would
+    swallow --project and --audit into the install command, silently ignoring
+    them; a mis-specified audit path is exactly the kind of thing that must
+    fail loudly rather than be dropped.
+    """
+    if "--" in args:
+        index = args.index("--")
+        return args[:index], args[index + 1:]
+    return args, []
+
+
 def main(args: Optional[List[str]] = None) -> int:
     if args is None:
         args = sys.argv[1:]
+
+    args, sandbox_command = split_on_separator(list(args))
 
     parser = build_parser()
     try:
@@ -99,12 +178,67 @@ def main(args: Optional[List[str]] = None) -> int:
     except SystemExit as e:
         return 2 if e.code != 0 else 0
 
+    if parsed_args.command == "proxy":
+        try:
+            policy = load_policy(
+                parsed_args.ecosystem, allowlists_dir=parsed_args.allowlists_dir
+            )
+        except PolicyError as e:
+            sys.stderr.write(f"Error: {e}\n")
+            return 2
+        run_proxy_server(
+            policy,
+            port=parsed_args.port,
+            audit_path=parsed_args.audit,
+            enabled_conditions=set(parsed_args.allowed_conditions),
+            host=parsed_args.bind,
+        )
+        return 0
+
     if parsed_args.command == "run":
-        # Deliberate fail-closed default. Never fall back to unsandboxed
-        # execution: no execution path may be added here before the enforcement
-        # point exists. See docs/threat-model.md section 6.
-        sys.stderr.write(REFUSAL)
-        return 2
+        command = sandbox_command or list(parsed_args.argv)
+        if not command:
+            sys.stderr.write(
+                "bh: no install command given.\n"
+                "    Put the command after a '--' separator, for example:\n"
+                "      bh run npm -- npm ci\n"
+            )
+            return 2
+
+        try:
+            policy = load_policy(
+                parsed_args.ecosystem, allowlists_dir=parsed_args.allowlists_dir
+            )
+        except PolicyError as e:
+            sys.stderr.write(f"Error: {e}\n")
+            return 2
+
+        project = (parsed_args.project or Path.cwd()).resolve()
+        # Not inside the project: that directory is mounted writable into the
+        # sandbox, so a log there is one the payload can rewrite.
+        audit_path = parsed_args.audit or default_audit_path(project)
+
+        try:
+            result = run_install(
+                policy=policy,
+                command=command,
+                project_dir=project,
+                image=parsed_args.image,
+                audit_path=audit_path,
+                enabled_conditions=set(parsed_args.allowed_conditions),
+            )
+        except RunnerError as e:
+            # Every failure here is a refusal to run unprotected.
+            sys.stderr.write(f"bh: refusing to run. {e}\n")
+            return 2
+
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        sys.stdout.write(
+            f"\nbh: egress decisions recorded in {audit_path}\n"
+            f"    review with: bh audit {audit_path}\n"
+        )
+        return result.exit_code
 
     if parsed_args.command == "audit":
         log = AuditLog(parsed_args.path)
