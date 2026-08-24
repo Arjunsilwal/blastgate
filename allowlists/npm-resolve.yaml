@@ -1,0 +1,30 @@
+# Resolve-phase policy for npm.
+#
+# This allowlist is used by ONE thing: the phase that fetches declared git
+# dependencies before an install runs. No package lifecycle scripts execute
+# under this policy and no credentials are present, so reaching a code forge
+# here is a much smaller grant than reaching one during an install.
+#
+# The registry is deliberately absent. Resolution fetches git refs and nothing
+# else; if something under this policy tries to reach registry.npmjs.org, that
+# is not resolution and it is denied.
+#
+# The install phase uses npm.yaml, where these same forge hosts are NOT
+# reachable. That separation is the point: the forge is available while no
+# untrusted code runs, and unavailable once it does.
+ecosystem: npm-resolve
+version: 1
+
+exact:
+  - host: github.com
+    reason: "git clone of a declared dependency"
+  - host: gitlab.com
+    reason: "git clone of a declared dependency"
+  - host: bitbucket.org
+    reason: "git clone of a declared dependency"
+  - host: codeload.github.com
+    reason: "GitHub archive download for a declared dependency"
+
+wildcard: []
+
+conditional: []

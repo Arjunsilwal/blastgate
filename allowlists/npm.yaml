@@ -11,10 +11,21 @@ wildcard:
   - pattern: "*.npmjs.org"
     reason: "Registry CDN edge nodes and asset endpoints"
 
+# Conditional hosts are NOT reachable during an install.
+#
+# The git-dependencies condition no longer opens these hosts to the install
+# phase. It permits the separate resolve phase to run, which fetches declared
+# git dependencies under npm-resolve.yaml while no package code is executing.
+# By the time an install runs, these entries are dead: the payload has no route
+# to a forge and no rule that would allow one.
+#
+# They stay listed because policy still has to name them to deny them, and
+# because `bh check npm github.com --allow git-dependencies` should keep
+# answering the question it has always answered: is this host in the allowlist.
 conditional:
   - host: github.com
     condition: git-dependencies
-    reason: "Direct git repository dependencies and GitHub release assets"
+    reason: "Resolve phase only: git clone of a declared dependency"
   - host: raw.githubusercontent.com
     condition: git-dependencies
     reason: "Raw repository file dependencies"

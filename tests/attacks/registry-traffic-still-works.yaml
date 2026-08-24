@@ -12,3 +12,7 @@ note: >
   The false-positive guard. Break one legitimate install and the user uninstalls
   within the hour, so the corpus has to defend working traffic as seriously as it
   attacks the rest.
+  Deliberately the same destination as exfil-via-registry-during-install, scored
+  the opposite way. Both are true at once: this host must stay reachable, and
+  its reachability is a residual exfiltration channel. Splitting them keeps the
+  published number from hiding either half.

@@ -20,10 +20,9 @@ from bulkhead.policy import load_policy
 from bulkhead.runner import (
     RunnerError,
     assert_audit_log_unreachable,
-    build_proxy_image,
     default_audit_path,
     detect_runtime,
-    proxy_image_exists,
+    ensure_proxy_image,
     run_install,
 )
 
@@ -39,8 +38,7 @@ IMAGE = "python:3.12-alpine"
 
 @pytest.fixture(scope="module", autouse=True)
 def proxy_image():
-    if not proxy_image_exists(RUNTIME):
-        build_proxy_image(RUNTIME)
+    ensure_proxy_image(RUNTIME)
 
 
 @pytest.fixture
@@ -244,3 +242,109 @@ class TestAnchoring:
                 ["true"], project, audit,
                 anchor_path=audit.parent / "sneaky.anchors",
             )
+
+
+@pytest.fixture(scope="module")
+def git_install():
+    """One real install of a git dependency, shared by the assertions below."""
+    import json as _json
+
+    from bulkhead.runner import default_anchor_path
+
+    base = Path.home() / ".bulkhead-tests"
+    base.mkdir(parents=True, exist_ok=True)
+    project = Path(tempfile.mkdtemp(dir=base))
+    (project / "package.json").write_text(_json.dumps({
+        "name": "demo", "version": "1.0.0",
+        "dependencies": {"is-odd": "github:jonschlinkert/is-odd"},
+    }) + "\n")
+
+    audit = default_audit_path(project)
+    anchors = default_anchor_path(project)
+    for artefact in (audit, anchors):
+        if artefact.exists():
+            artefact.unlink()
+
+    result = run_install(
+        policy=load_policy("npm"),
+        command=["npm", "install", "--no-audit", "--no-fund"],
+        project_dir=project, audit_path=audit,
+        enabled_conditions={"git-dependencies"}, host_env={}, timeout=900,
+    )
+    yield project, audit, result
+    shutil.rmtree(project, ignore_errors=True)
+    for artefact in (audit, anchors):
+        if artefact.exists():
+            artefact.unlink()
+
+
+@pytest.mark.skipif(RUNTIME is None, reason="no container runtime available")
+class TestTwoPhaseResolution:
+    """The forge gap, closed by separating resolution from execution."""
+
+    def test_a_git_dependency_installs(self, git_install):
+        # The false-positive guard, and the most likely thing to break. Closing
+        # a gap by breaking the feature it belonged to is not closing it.
+        project, _, result = git_install
+        assert result.exit_code == 0, result.stderr[-1000:]
+        assert (project / "node_modules" / "is-odd").is_dir()
+
+    def test_the_resolve_phase_did_reach_the_forge(self, git_install):
+        # Otherwise the test below proves nothing: an install that never needed
+        # a forge would also show no forge access during install.
+        _, audit, _ = git_install
+        resolve = [e for e in AuditLog(audit).read_all() if e.ecosystem == "npm-resolve"]
+        assert any(e.host == "github.com" and e.allowed for e in resolve)
+
+    def test_the_install_phase_never_reaches_a_forge(self, git_install):
+        # The whole point. During the phase where package code executes, no
+        # forge is allowed - including the one the dependency came from.
+        _, audit, _ = git_install
+        install = [e for e in AuditLog(audit).read_all() if e.ecosystem == "npm"]
+        forge_allows = [
+            e for e in install
+            if e.allowed and ("github" in e.host or "gitlab" in e.host or "bitbucket" in e.host)
+        ]
+        assert not forge_allows, [(e.host, e.rule) for e in forge_allows]
+
+    def test_a_forge_request_during_install_is_denied_and_logged(self, git_install):
+        # npm does try. The denial is in the log rather than absent from it,
+        # which is the difference between enforcement and never being asked.
+        _, audit, _ = git_install
+        install = [e for e in AuditLog(audit).read_all() if e.ecosystem == "npm"]
+        denials = [e for e in install if not e.allowed]
+        assert denials, "expected at least one denied request during install"
+
+    def test_the_git_cache_is_read_only_in_the_install(self, git_install):
+        # A writable cache would be a channel from the install back into the
+        # phase that has forge access.
+        from bulkhead.runner import CACHE_MOUNT
+
+        project, audit, _ = git_install
+        result = run_install(
+            policy=load_policy("npm"),
+            command=["sh", "-c", f"touch {CACHE_MOUNT}/probe 2>/dev/null && echo WRITABLE || echo READONLY"],
+            project_dir=project, audit_path=audit,
+            enabled_conditions={"git-dependencies"}, host_env={}, timeout=600,
+        )
+        assert "READONLY" in result.stdout
+
+    def test_git_dependencies_without_the_flag_are_refused(self, git_install):
+        # Fail closed. The alternative is an install that reaches a forge it
+        # was never granted.
+        from bulkhead.runner import UnresolvableDependencyError
+
+        project, audit, _ = git_install
+        with pytest.raises(UnresolvableDependencyError, match="resolve phase is not enabled"):
+            run_install(
+                policy=load_policy("npm"), command=["true"],
+                project_dir=project, audit_path=audit,
+                enabled_conditions=set(), host_env={}, timeout=300,
+            )
+
+    def test_the_resolve_policy_cannot_reach_the_registry(self):
+        # Resolution fetches git refs. Anything reaching for the registry under
+        # this policy is not resolution.
+        policy = load_policy("npm-resolve")
+        assert policy.evaluate("registry.npmjs.org").allowed is False
+        assert policy.evaluate("github.com").allowed is True

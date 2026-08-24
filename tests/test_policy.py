@@ -119,7 +119,9 @@ class TestConditionalRules:
         assert decision.allowed is True
         assert decision.matched_tier == "conditional"
         assert decision.rule == "conditional:github.com"
-        assert "git repository" in decision.reason.lower()
+        # The reason now says what the grant actually is. This host is
+        # reachable during resolution and not during an install.
+        assert "resolve phase" in decision.reason.lower()
 
     def test_conditional_raw_github_when_condition_enabled(self, npm_policy):
         decision = npm_policy.evaluate("raw.githubusercontent.com", enabled_conditions={"git-dependencies"})

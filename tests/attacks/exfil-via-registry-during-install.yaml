@@ -1,0 +1,23 @@
+id: exfil-via-registry-during-install
+title: Payload uses the package registry itself as the exfiltration channel
+chain_link: 5
+ecosystem: npm
+source: constructed
+expect: not_prevented
+requires: proxy
+
+target:
+  host: registry.npmjs.org
+  port: 443
+
+note: >
+  The honest residual left behind by closing the forge gap, and the reason that
+  fix is a narrowing rather than a solution. The registry has to be reachable
+  during an install; that is what an install is. Any allowlisted host that
+  accepts writes is a potential channel, and a registry accepts publishes.
+  Credential stripping is what reduces this: an anonymous payload has no token
+  to publish with, and the environment filter is why it has none. That is a
+  mitigation, not a closure, so this is counted as a failure.
+  Closing it properly needs something this design does not have - either
+  distinguishing a read from a write inside TLS, or an install that does not
+  need the network at all.

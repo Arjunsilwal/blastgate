@@ -16,6 +16,13 @@ parts:
    joined to both networks, which makes it the only route out. The install
    container reaches it by name and can reach nothing else.
 
+4. Two-phase resolution. Git dependencies are needed during resolution; the
+   payload runs during install. Those are only the same phase because nothing
+   separates them, so this separates them. Declared dependencies are fetched
+   first, under a policy where forges are reachable and no package code runs,
+   and served during the install from a read-only mirror. The forge is not in
+   the install's allowlist at all.
+
 The proxy environment variables handed to the install are configuration, and a
 payload has no reason to honour them. What stops it is that there is no route to
 find. See tests/test_end_to_end.py.
@@ -23,14 +30,16 @@ find. See tests/test_end_to_end.py.
 
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import time
 import uuid
-from typing import Dict, Iterable, Mapping, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from bulkhead.audit import AnchorStore, AuditLog
 
@@ -336,6 +345,8 @@ def run_sandboxed(
     runtime: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
     network: str = INTERNAL_NETWORK,
+    extra_mounts: Sequence[Tuple[Path, str, bool]] = (),
+    entrypoint: Optional[str] = None,
     timeout: int = 300,
 ) -> SandboxResult:
     """Run a command in the sandbox.
@@ -367,6 +378,16 @@ def run_sandboxed(
         "--security-opt", "no-new-privileges",
     ]
 
+    if entrypoint is not None:
+        argv += ["--entrypoint", entrypoint]
+
+    for source, target, readonly in extra_mounts:
+        source = Path(source).resolve()
+        mount = f"type=bind,source={source},target={target}"
+        if readonly:
+            mount += ",readonly"
+        argv += ["--mount", mount]
+
     for name, value in (env or {}).items():
         argv += ["--env", f"{name}={value}"]
 
@@ -392,7 +413,7 @@ def run_sandboxed(
 # makes it the only route out for the install. The install container reaches it
 # by name over the internal network and cannot reach anything else.
 
-PROXY_IMAGE = "bulkhead-proxy:local"
+PROXY_IMAGE_REPO = "bulkhead-proxy"
 PROXY_ALIAS = "bulkhead-proxy"
 PROXY_PORT = 3128
 
@@ -403,6 +424,9 @@ DEFAULT_IMAGES = {
 }
 
 
+NPM_GIT_IMAGE_REPO = "bulkhead-npm-git"
+
+
 def default_image_for(ecosystem: str) -> str:
     try:
         return DEFAULT_IMAGES[ecosystem]
@@ -410,6 +434,35 @@ def default_image_for(ecosystem: str) -> str:
         raise RunnerError(
             f"no default image for ecosystem '{ecosystem}'; pass --image explicitly"
         )
+
+
+def install_image_tag(context: Optional[Path] = None) -> str:
+    context = Path(context) if context else _repo_root()
+    dockerfile = context / "docker" / "npm-git.Dockerfile"
+    digest = hashlib.sha256(dockerfile.read_bytes()).hexdigest()[:12]
+    return f"{NPM_GIT_IMAGE_REPO}:{digest}"
+
+
+def ensure_install_image(runtime: str, context: Optional[Path] = None) -> str:
+    """Build the git-capable npm image if it is not already built.
+
+    Only used when a project declares git dependencies. A project without them
+    installs in the plain image and never gets a git binary it has no use for.
+    """
+    context = Path(context) if context else _repo_root()
+    dockerfile = context / "docker" / "npm-git.Dockerfile"
+    if not dockerfile.is_file():
+        raise RunnerError(f"install Dockerfile not found at {dockerfile}")
+    image = install_image_tag(context)
+    if _run([runtime, "image", "inspect", image]).returncode == 0:
+        return image
+    result = _run(
+        [runtime, "build", "-q", "-t", image, "-f", str(dockerfile), str(context)],
+        timeout=600,
+    )
+    if result.returncode != 0:
+        raise RunnerError(f"failed to build install image: {result.stderr.strip()}")
+    return image
 
 
 def assert_audit_log_unreachable(audit_path: Path, project_dir: Path) -> None:
@@ -493,21 +546,58 @@ def default_audit_path(project_dir: Path) -> Path:
     return Path.home() / ".bulkhead" / "audit" / f"{project_dir.name}-{digest}.log"
 
 
-def proxy_image_exists(runtime: str) -> bool:
-    return _run([runtime, "image", "inspect", PROXY_IMAGE]).returncode == 0
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
 
 
-def build_proxy_image(runtime: str, context: Optional[Path] = None) -> None:
-    context = Path(context) if context else Path(__file__).resolve().parent.parent
+def proxy_image_tag(context: Optional[Path] = None) -> str:
+    """Tag the proxy image by the content that goes into it.
+
+    A fixed tag lets the image go stale. That is not a build annoyance, it is a
+    security bug: the sidecar would keep enforcing whatever allowlist it was
+    built with while the files on disk say something else, and the mismatch is
+    invisible. Deriving the tag from the sources means changing a policy
+    changes the tag, and a tag that does not exist gets built.
+    """
+    context = Path(context) if context else _repo_root()
+    digest = hashlib.sha256()
+    sources = sorted(
+        list((context / "bulkhead").glob("*.py"))
+        + list((context / "allowlists").glob("*.yaml"))
+        + [context / "docker" / "proxy.Dockerfile"]
+    )
+    for path in sources:
+        if path.is_file():
+            digest.update(path.name.encode("utf-8"))
+            digest.update(path.read_bytes())
+    return f"{PROXY_IMAGE_REPO}:{digest.hexdigest()[:12]}"
+
+
+def proxy_image_exists(runtime: str, image: Optional[str] = None) -> bool:
+    return _run([runtime, "image", "inspect", image or proxy_image_tag()]).returncode == 0
+
+
+def build_proxy_image(runtime: str, context: Optional[Path] = None) -> str:
+    context = Path(context) if context else _repo_root()
     dockerfile = context / "docker" / "proxy.Dockerfile"
     if not dockerfile.is_file():
         raise RunnerError(f"proxy Dockerfile not found at {dockerfile}")
+    image = proxy_image_tag(context)
     result = _run(
-        [runtime, "build", "-q", "-t", PROXY_IMAGE, "-f", str(dockerfile), str(context)],
+        [runtime, "build", "-q", "-t", image, "-f", str(dockerfile), str(context)],
         timeout=600,
     )
     if result.returncode != 0:
         raise RunnerError(f"failed to build proxy image: {result.stderr.strip()}")
+    return image
+
+
+def ensure_proxy_image(runtime: str, context: Optional[Path] = None) -> str:
+    """Build the proxy image if the current sources have not been built yet."""
+    image = proxy_image_tag(context)
+    if not proxy_image_exists(runtime, image):
+        return build_proxy_image(runtime, context)
+    return image
 
 
 class ProxySidecar:
@@ -525,7 +615,9 @@ class ProxySidecar:
         runtime: str,
         enabled_conditions: Optional[Set[str]] = None,
         name: Optional[str] = None,
+        image: Optional[str] = None,
     ) -> None:
+        self.image = image or proxy_image_tag()
         self.ecosystem = ecosystem
         self.audit_path = Path(audit_path).resolve()
         self.runtime = runtime
@@ -546,7 +638,7 @@ class ProxySidecar:
             "--mount", f"type=bind,source={self.audit_path.parent},target=/audit",
             "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
-            PROXY_IMAGE,
+            self.image,
             "proxy", self.ecosystem,
             "--port", str(PROXY_PORT),
             "--bind", "0.0.0.0",
@@ -637,6 +729,7 @@ def run_install(
     enabled_conditions: Optional[Set[str]] = None,
     runtime: Optional[str] = None,
     host_env: Optional[Mapping[str, str]] = None,
+    git_cache_dir: Optional[Path] = None,
     timeout: int = 600,
 ) -> SandboxResult:
     """Run an install in the sandbox with the proxy as its only route out.
@@ -652,14 +745,53 @@ def run_install(
     assert_audit_log_unreachable(audit_path, project_dir)
     assert_anchor_store_unreachable(anchor_path, audit_path, project_dir)
 
-    image = image or default_image_for(policy.ecosystem)
+    explicit_image = image is not None
+    enabled_conditions = set(enabled_conditions or ())
+
+    # Resolve phase. Anything declared is fetched now, while no project code is
+    # running, and served locally during the install.
+    dependencies = parse_git_dependencies(project_dir)
+    cache_dir = Path(git_cache_dir or GIT_CACHE_DIR).resolve()
+    if dependencies:
+        if not (enabled_conditions & RESOLVE_ONLY_CONDITIONS):
+            names = ", ".join(sorted({d.name for d in dependencies}))
+            raise UnresolvableDependencyError(
+                f"this project declares git dependencies ({names}) and the "
+                f"resolve phase is not enabled. Re-run with "
+                f"--allow git-dependencies, which fetches them before the "
+                f"install starts rather than opening a forge to it."
+            )
+        resolve_git_dependencies(
+            dependencies, audit_path=audit_path, runtime=runtime,
+            cache_dir=cache_dir, timeout=timeout,
+        )
+
+    if explicit_image:
+        pass
+    elif dependencies and policy.ecosystem == "npm":
+        # npm shells out to git even for an already-local repository.
+        image = ensure_install_image(runtime)
+    else:
+        image = default_image_for(policy.ecosystem)
+
+    # The forge is not reachable from the install, whatever the user enabled.
+    # git-dependencies permits the resolve phase; it does not open a host to
+    # code that is about to execute.
+    install_conditions = enabled_conditions - RESOLVE_ONLY_CONDITIONS
 
     ensure_networks(runtime)
-    if not proxy_image_exists(runtime):
-        build_proxy_image(runtime)
+    image_tag = ensure_proxy_image(runtime)
 
     env = dict(strip_environment(host_env if host_env is not None else os.environ).passed)
     env.update(PROXY_ENV)
+
+    extra_mounts: List[Tuple[Path, str, bool]] = []
+    if dependencies:
+        # Read-only. A writable cache would be a channel from the install back
+        # into the phase that has forge access.
+        extra_mounts.append((cache_dir, CACHE_MOUNT, True))
+        env["GIT_CONFIG_GLOBAL"] = f"{CACHE_MOUNT}/{GITCONFIG_NAME}"
+        env["GIT_TERMINAL_PROMPT"] = "0"
 
     run_id = uuid.uuid4().hex
 
@@ -667,7 +799,8 @@ def run_install(
         policy.ecosystem,
         audit_path=audit_path,
         runtime=runtime,
-        enabled_conditions=enabled_conditions,
+        enabled_conditions=install_conditions,
+        image=image_tag,
     ):
         result = run_sandboxed(
             command,
@@ -676,6 +809,7 @@ def run_install(
             runtime=runtime,
             env=env,
             network=INTERNAL_NETWORK,
+            extra_mounts=extra_mounts,
             timeout=timeout,
         )
 
@@ -683,4 +817,324 @@ def run_install(
     # process from the one that wrote the log, writing to a store that process
     # never had mounted.
     AnchorStore(anchor_path).append(run_id, audit_path, AuditLog(audit_path).read_all())
+    return result
+
+
+# --- Resolve phase: what to fetch -----------------------------------------
+#
+# Git dependencies are needed during resolution. The payload runs during
+# install. Those are only the same phase because nothing separates them, so
+# this separates them.
+#
+# Everything below decides WHAT to fetch by reading files. It executes nothing
+# and it runs before any container exists. Anything it cannot parse with
+# confidence is refused rather than guessed at, because a guess here turns into
+# either a missing dependency or an unexpected host.
+
+GIT_CACHE_DIR = Path.home() / ".bulkhead" / "git-cache"
+
+# Hosts a declared dependency may be fetched from during resolution. Kept in
+# step with allowlists/npm-resolve.yaml; policy is still the decider, this is
+# only used to reject a spec early with a clearer message.
+RESOLVABLE_FORGES = frozenset({"github.com", "gitlab.com", "bitbucket.org"})
+
+FORGE_PREFIXES = {
+    "github": "github.com",
+    "gitlab": "gitlab.com",
+    "bitbucket": "bitbucket.org",
+}
+
+# The condition that no longer opens a forge to the install. It permits the
+# resolve phase to run instead.
+RESOLVE_ONLY_CONDITIONS = frozenset({"git-dependencies"})
+
+_GIT_HTTPS_RE = re.compile(
+    r"^(?:git\+)?https://(?P<host>[A-Za-z0-9.-]+)/(?P<path>[A-Za-z0-9._/-]+?)"
+    r"(?:\.git)?(?:#(?P<ref>[^\s#]+))?$"
+)
+# npm writes ssh forms into lockfiles as a matter of course. Fetching is done
+# over https regardless: the repository is the same, the transport is one the
+# proxy can enforce, and no key is present to authenticate with anyway.
+_GIT_SSH_RE = re.compile(
+    r"^(?:git\+)?ssh://git@(?P<host>[A-Za-z0-9.-]+)/(?P<path>[A-Za-z0-9._/-]+?)"
+    r"(?:\.git)?(?:#(?P<ref>[^\s#]+))?$"
+)
+_GIT_SCP_RE = re.compile(
+    r"^git@(?P<host>[A-Za-z0-9.-]+):(?P<path>[A-Za-z0-9._/-]+?)"
+    r"(?:\.git)?(?:#(?P<ref>[^\s#]+))?$"
+)
+_SHORTHAND_RE = re.compile(
+    r"^(?:(?P<forge>github|gitlab|bitbucket):)?"
+    r"(?P<path>[A-Za-z0-9._-]+/[A-Za-z0-9._-]+?)"
+    r"(?:\.git)?(?:#(?P<ref>[^\s#]+))?$"
+)
+_UNENCRYPTED_RE = re.compile(r"^(?:git\+)?git://")
+
+
+class UnresolvableDependencyError(RunnerError):
+    """A declared git dependency cannot be fetched safely.
+
+    Raised rather than skipped. Skipping would leave the install to discover
+    the dependency itself, at which point it needs a forge that is deliberately
+    unreachable, and the failure would surface as something less clear.
+    """
+
+
+@dataclass(frozen=True)
+class GitDependency:
+    name: str
+    host: str
+    path: str          # owner/repo, no .git suffix
+    ref: Optional[str]
+    origin: str        # the spec exactly as it was declared
+
+    @property
+    def fetch_url(self) -> str:
+        return f"https://{self.host}/{self.path}.git"
+
+    @property
+    def cache_subpath(self) -> str:
+        return f"{self.host}/{self.path}.git"
+
+
+def parse_git_spec(name: str, spec: str) -> Optional[GitDependency]:
+    """Interpret one dependency spec. None if it is not a git dependency.
+
+    Raises UnresolvableDependencyError for a spec that is recognisably a git
+    dependency but cannot be fetched under this design.
+    """
+    if not isinstance(spec, str):
+        return None
+    spec = spec.strip()
+    if not spec:
+        return None
+
+    if _UNENCRYPTED_RE.match(spec):
+        raise UnresolvableDependencyError(
+            f"dependency {name!r} uses the unencrypted git:// protocol ({spec!r}). "
+            f"Bulkhead only tunnels TLS, so this cannot be fetched or enforced. "
+            f"Change it to https:// in your manifest."
+        )
+
+    # An https URL is only a git dependency when it says so. Lockfiles are full
+    # of registry tarball URLs, and reading one of those as a repository would
+    # send the resolve phase after a package that was never on a forge - or
+    # refuse the install outright, which is what this check exists to prevent.
+    url_part = spec.split("#", 1)[0]
+    looks_like_git_url = spec.startswith("git+") or url_part.endswith(".git")
+
+    for pattern, always_git in (
+        (_GIT_HTTPS_RE, False), (_GIT_SSH_RE, True), (_GIT_SCP_RE, True),
+    ):
+        match = pattern.match(spec)
+        if match:
+            if not always_git and not looks_like_git_url:
+                return None
+            host = match.group("host")
+            if host not in RESOLVABLE_FORGES:
+                raise UnresolvableDependencyError(
+                    f"dependency {name!r} points at {host}, which is not a "
+                    f"resolvable forge. Add it to allowlists/npm-resolve.yaml "
+                    f"deliberately, or vendor the dependency."
+                )
+            return GitDependency(
+                name=name, host=host, path=match.group("path").rstrip("/"),
+                ref=match.group("ref"), origin=spec,
+            )
+
+    # Shorthand is only a git dependency when it is unambiguous. A version
+    # range, a file: path, an npm: alias and a tag all reach here and must not
+    # be mistaken for owner/repo.
+    if "/" in spec and not spec[0].isdigit() and spec[0] not in "^~<>=*":
+        match = _SHORTHAND_RE.match(spec)
+        if match:
+            forge = match.group("forge")
+            host = FORGE_PREFIXES[forge] if forge else "github.com"
+            return GitDependency(
+                name=name, host=host, path=match.group("path"),
+                ref=match.group("ref"), origin=spec,
+            )
+    return None
+
+
+DEPENDENCY_SECTIONS = (
+    "dependencies", "devDependencies", "optionalDependencies", "peerDependencies",
+)
+
+
+def parse_git_dependencies(project_dir: Path) -> List[GitDependency]:
+    """Every git dependency declared by the project's manifest and lockfile.
+
+    Reads only. The lockfile matters as much as the manifest: transitive git
+    dependencies appear there and nowhere else, and one this misses is one the
+    install will try to fetch itself from a forge it cannot reach.
+    """
+    project_dir = Path(project_dir)
+    found: Dict[str, GitDependency] = {}
+
+    manifest = project_dir / "package.json"
+    if manifest.is_file():
+        data = _read_json(manifest)
+        for section in DEPENDENCY_SECTIONS:
+            for name, spec in (data.get(section) or {}).items():
+                dependency = parse_git_spec(name, spec)
+                if dependency:
+                    found[dependency.cache_subpath] = dependency
+
+    lockfile = project_dir / "package-lock.json"
+    if lockfile.is_file():
+        data = _read_json(lockfile)
+        for key, entry in (data.get("packages") or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            resolved = entry.get("resolved")
+            if not isinstance(resolved, str):
+                continue
+            dependency = parse_git_spec(entry.get("name") or key or "?", resolved)
+            if dependency:
+                found.setdefault(dependency.cache_subpath, dependency)
+
+    return sorted(found.values(), key=lambda d: d.cache_subpath)
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError) as e:
+        raise RunnerError(
+            f"cannot read {path}: {e}. Refusing to run rather than proceed with "
+            f"an unknown set of dependencies."
+        )
+    if not isinstance(data, dict):
+        raise RunnerError(f"{path} does not contain a JSON object")
+    return data
+
+
+# --- Resolve phase: fetching ----------------------------------------------
+
+GIT_IMAGE = "alpine/git:latest"
+CACHE_MOUNT = "/bulkhead-git"
+GITCONFIG_NAME = "gitconfig"
+
+
+def _clone_script(dependencies: Sequence[GitDependency]) -> str:
+    """A shell script that mirrors each declared repository into the cache.
+
+    --mirror rather than a ref-specific fetch, so the install can resolve any
+    ref the manifest names without this phase having to interpret npm's
+    resolution rules. Getting that interpretation wrong would mean a missing
+    ref at install time, and by then the forge is unreachable by design.
+    """
+    lines = ["set -e"]
+    for dependency in dependencies:
+        url = shlex.quote(dependency.fetch_url)
+        target = shlex.quote(f"/workspace/{dependency.cache_subpath}")
+        lines += [
+            f"if [ -d {target} ]; then",
+            f"  echo 'update {dependency.cache_subpath}'",
+            f"  git --git-dir={target} fetch --prune --quiet origin '+refs/*:refs/*'",
+            "else",
+            f"  echo 'clone {dependency.cache_subpath}'",
+            f"  mkdir -p $(dirname {target})",
+            f"  git clone --mirror --quiet {url} {target}",
+            "fi",
+        ]
+    lines.append("echo RESOLVE_OK")
+    return "\n".join(lines)
+
+
+def write_git_redirect_config(cache_dir: Path, hosts: Iterable[str]) -> Path:
+    """Point every forge URL form at the local cache.
+
+    Written on the host and mounted read-only, so the install never runs a
+    command to configure this and cannot rewrite it. If a repository was not
+    fetched, its URL rewrites to a path that does not exist and git fails
+    locally. It does not fall back to the network, because there is no network
+    to fall back to.
+    """
+    lines = []
+    for host in sorted(set(hosts)):
+        local = f"{CACHE_MOUNT}/{host}/"
+        lines.append(f'[url "{local}"]')
+        for form in (
+            f"https://{host}/",
+            f"git+https://{host}/",
+            f"ssh://git@{host}/",
+            f"git+ssh://git@{host}/",
+            f"git@{host}:",
+        ):
+            lines.append(f"\tinsteadOf = {form}")
+    path = cache_dir / GITCONFIG_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _link_bare_aliases(cache_dir: Path, dependencies: Sequence[GitDependency]) -> None:
+    """Make owner/repo resolve as well as owner/repo.git.
+
+    npm asks for both forms depending on how the dependency was declared, and a
+    rewrite that only covers one of them fails for the other.
+    """
+    for dependency in dependencies:
+        bare = cache_dir / dependency.cache_subpath
+        alias = bare.with_suffix("")
+        if bare.is_dir() and not alias.exists():
+            try:
+                alias.symlink_to(bare.name)
+            except OSError:
+                pass
+
+
+def resolve_git_dependencies(
+    dependencies: Sequence[GitDependency],
+    audit_path: Path,
+    runtime: Optional[str] = None,
+    cache_dir: Path = GIT_CACHE_DIR,
+    image: str = GIT_IMAGE,
+    timeout: int = 600,
+) -> SandboxResult:
+    """Fetch declared git dependencies with no project code present.
+
+    Runs under allowlists/npm-resolve.yaml, where forges are reachable and the
+    registry is not. The project directory is deliberately NOT mounted: this
+    phase needs the manifest's conclusions, not its contents, and mounting it
+    would put attacker-influenced files next to the one process in the design
+    that can reach a forge.
+    """
+    from bulkhead.policy import load_policy
+
+    runtime = runtime or detect_runtime()
+    cache_dir = Path(cache_dir).resolve()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    ensure_networks(runtime)
+    image_tag = ensure_proxy_image(runtime)
+
+    policy = load_policy("npm-resolve")
+    env = dict(PROXY_ENV)
+    # Nothing to authenticate with. Any credential prompt is a hang, not a
+    # login, so fail instead of waiting.
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = "/bin/true"
+
+    with ProxySidecar(
+        policy.ecosystem, audit_path=audit_path, runtime=runtime, image=image_tag,
+    ):
+        result = run_sandboxed(
+            ["-c", _clone_script(dependencies)],
+            cache_dir, image, runtime=runtime, env=env,
+            network=INTERNAL_NETWORK, entrypoint="sh", timeout=timeout,
+        )
+
+    if result.exit_code != 0 or "RESOLVE_OK" not in result.stdout:
+        raise UnresolvableDependencyError(
+            "resolve phase failed, so the install would need a forge it cannot "
+            "reach. Refusing to run.\n"
+            + (result.stderr.strip() or result.stdout.strip())[-800:]
+        )
+
+    _link_bare_aliases(cache_dir, dependencies)
+    write_git_redirect_config(cache_dir, (d.host for d in dependencies))
     return result

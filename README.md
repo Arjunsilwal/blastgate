@@ -1,10 +1,10 @@
 # bulkhead
 
 > **Status: pre-alpha. Every control in the design is built and demonstrated
-> against running containers, and the known gaps have not shrunk.** A real
-> `npm install` completes inside the sandbox with one allowed route out. It has
-> not been run against a live worm, and it does not stop a payload that exfils
-> through a host you allowlisted — read
+> against running containers.** A real `npm install` completes inside the
+> sandbox with one allowed route out, including projects with git dependencies,
+> which are fetched before any package code runs. It has not been run against a
+> live worm, and a payload can still use the registry itself as a channel — read
 > [docs/threat-model.md](docs/threat-model.md) section 8 before relying on it.
 
 Run package installs with no credentials available and no network egress except
@@ -59,7 +59,7 @@ python scripts/attack_report.py --write
 ```
 
 <!-- corpus:begin -->
-**7 of 8 scenarios prevented (88%).**
+**8 of 9 scenarios prevented (89%).**
 
 | Scenario | Link | Expected | Result |
 | --- | --- | --- | --- |
@@ -68,12 +68,13 @@ python scripts/attack_report.py --write
 | `egress-nonstandard-port` | 5 | denied | prevented |
 | `egress-raw-ip` | 5 | denied | prevented |
 | `egress-unlisted-host` | 5 | denied | prevented |
-| `exfil-over-tls-to-allowlisted-host` | 5 | not_prevented | known-gap ⚠ |
+| `exfil-over-tls-to-allowlisted-host` | 5 | denied | prevented |
+| `exfil-via-registry-during-install` | 5 | not_prevented | known-gap ⚠ |
 | `harvest-host-credential-files` | 4 | denied | prevented |
 | `registry-traffic-still-works` | 0 | allowed | allowed |
 
 Counted as failures because they are:
-- `exfil-over-tls-to-allowlisted-host` — Payload writes stolen material to an attacker repo on an allowlisted forge
+- `exfil-via-registry-during-install` — Payload uses the package registry itself as the exfiltration channel
 <!-- corpus:end -->
 
 The rate counts a disclosed gap as a failure, because it is one. It counts a
@@ -97,6 +98,39 @@ tests are built around:
 ```
 tests/test_end_to_end.py::TestTheWholeThing::test_a_payload_that_ignores_the_proxy_is_still_blocked
 ```
+
+### Git dependencies never open a forge
+
+A dependency like `"is-odd": "github:jonschlinkert/is-odd"` used to require
+putting `github.com` in the allowlist for the whole install — and a proxy that
+does not intercept TLS cannot tell a clone of that repository from a push of
+your stolen token to an attacker's.
+
+So the forge is not in the install's allowlist at all. Declared git dependencies
+are fetched first, by a separate phase running under
+[`allowlists/npm-resolve.yaml`](allowlists/npm-resolve.yaml), where forges are
+reachable, the registry is not, and no package lifecycle script executes. The
+install then reads them from a read-only local mirror.
+
+```bash
+bh run npm --allow git-dependencies -- npm install
+```
+
+`--allow git-dependencies` no longer opens a host to the install. It permits the
+resolve phase to run. The audit log from a real run shows the difference:
+
+```
+npm-resolve  ALLOW  github.com            ← fetched, before any package code ran
+npm          ALLOW  registry.npmjs.org
+npm          DENY   codeload.github.com   ← the install tried; it was refused
+```
+
+The install succeeds anyway, from the mirror. There is no read to distinguish
+from a write because there is no connection.
+
+This is a narrowing, not a solution. The registry has to stay reachable during
+an install, and a registry accepts writes — that residual is the corpus scenario
+`exfil-via-registry-during-install`, counted as a failure below.
 
 The audit log is written to a directory mounted into the proxy container and
 nowhere else, so the sandbox cannot read or delete it. Pointing `--audit` inside

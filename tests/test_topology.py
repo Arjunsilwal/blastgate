@@ -34,6 +34,17 @@ from bulkhead.runner import (
 IMAGE = "alpine:3.20"
 REACH = "wget -q -T 5 -O /dev/null https://registry.npmjs.org && echo REACHED || echo BLOCKED"
 
+# The control gets a longer timeout and retries; the isolation tests do not.
+# The asymmetry is deliberate. A false BLOCKED in the control is a transient
+# network hiccup being read as proof of isolation, and a control that flakes is
+# a control people learn to ignore. A false BLOCKED in an isolation test is the
+# expected answer anyway, so retrying there would only slow the suite.
+CONTROL_REACH = (
+    "for i in 1 2 3; do "
+    "wget -q -T 15 -O /dev/null https://registry.npmjs.org && { echo REACHED; exit 0; }; "
+    "sleep 2; done; echo BLOCKED"
+)
+
 
 try:
     RUNTIME = detect_runtime()
@@ -71,7 +82,8 @@ class TestControl:
         # meaningless, because a runtime with no connectivity would pass them
         # all while proving nothing.
         result = run_sandboxed(
-            ["sh", "-c", REACH], project, IMAGE, runtime=RUNTIME, network="bridge"
+            ["sh", "-c", CONTROL_REACH], project, IMAGE, runtime=RUNTIME,
+            network="bridge", timeout=120,
         )
         assert "REACHED" in result.stdout, (
             "baseline connectivity failed; isolation results below cannot be trusted"

@@ -1,19 +1,25 @@
 id: exfil-over-tls-to-allowlisted-host
-title: Payload writes stolen material to an attacker repo on an allowlisted forge
+title: Payload writes stolen material to an attacker repo on a code forge
 chain_link: 5
 ecosystem: npm
 source: constructed
-expect: not_prevented
+expect: denied
 requires: proxy
+
 enable:
   - git-dependencies
 
 target:
   host: github.com
   port: 443
+
 note: >
-  A disclosed gap from threat model §8.1, written as an executable fact. With
-  git-dependencies enabled and no TLS interception, the proxy sees an allowed
-  hostname and nothing else. This scenario is expected to succeed for the
-  attacker. It exists so the gap cannot be quietly assumed closed, and so the
-  published pass rate counts it.
+  This was a disclosed gap and is now closed, which is why it says denied and
+  not not_prevented. It was never closed by inspecting traffic. The forge is
+  simply not in the install phase's allowlist any more: declared git
+  dependencies are fetched beforehand, while no package code is running, and
+  served from a read-only local mirror. There is no read to distinguish from a
+  write because there is no connection.
+  Note that git-dependencies is enabled here. That used to be what opened this
+  host. It now permits the resolve phase and grants the install nothing, and
+  this scenario is what holds that distinction in place.

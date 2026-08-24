@@ -14,7 +14,7 @@ wired to any package manager. **Nothing in section 6 constitutes protection of a
 real install today.** See section 7 for the precise gap between design and
 implementation.
 
-Document version: 7. Last reviewed: 2026-08-22.
+Document version: 8. Last reviewed: 2026-08-22.
 
 **Design note, recorded because it departs from the v0 plan.** The plan specified
 environment variables "filtered by shape (prefix, and any name containing TOKEN,
@@ -225,6 +225,15 @@ connectivity would satisfy every isolation assertion while proving nothing.
 | The sandbox cannot see the anchor store *(runtime)* | Separate directory, mounted nowhere | `TestAnchoring::test_the_sandbox_cannot_see_the_anchor_store` |
 | An anchor beside the audit log is refused *(constrains bulkhead)* | That directory is mounted into the proxy, so the log's writer could forge its own anchor | `TestAnchoring::test_an_anchor_beside_the_audit_log_is_refused` |
 | An unanchored log is not reported as verified *(constrains bulkhead)* | `UNANCHORED` is a distinct verdict | `TestCliAudit::test_an_unanchored_log_does_not_report_as_verified` |
+| The install phase never reaches a code forge *(runtime)* | Forge is absent from the install allowlist; deps come from a local mirror | `test_end_to_end.py::TestTwoPhaseResolution::test_the_install_phase_never_reaches_a_forge` |
+| A forge request during install is denied and logged *(runtime)* | npm does try; the denial is recorded rather than absent | `TestTwoPhaseResolution::test_a_forge_request_during_install_is_denied_and_logged` |
+| A project with a git dependency still installs *(runtime)* | Resolve phase plus local mirror | `TestTwoPhaseResolution::test_a_git_dependency_installs` |
+| The resolve phase cannot reach the registry | Separate allowlist naming forges only | `TestTwoPhaseResolution::test_the_resolve_policy_cannot_reach_the_registry` |
+| The git cache is read-only during install *(runtime)* | A writable cache would be a channel back into the phase with forge access | `TestTwoPhaseResolution::test_the_git_cache_is_read_only_in_the_install` |
+| Git dependencies without the resolve flag refuse the run *(constrains bulkhead)* | Fail closed rather than reach a forge | `TestTwoPhaseResolution::test_git_dependencies_without_the_flag_are_refused` |
+| A registry tarball URL is not mistaken for a git dependency | https URLs need `git+` or `.git` | `test_runner.py::TestGitSpecParsing::test_dependencies_come_from_the_lockfile_too` |
+| An unparseable manifest refuses the run *(constrains bulkhead)* | Guessing the dependency set is worse than stopping | `TestGitSpecParsing::test_an_unparseable_manifest_refuses_rather_than_guesses` |
+| The proxy image cannot enforce a stale allowlist *(constrains bulkhead)* | Image tag is derived from the source and allowlist contents, so a policy change forces a rebuild | `TestProxyImageFreshness::test_changing_an_allowlist_changes_the_image_tag` |
 
 Two deliberate properties worth stating because they surprise people:
 
@@ -288,12 +297,19 @@ to read it and not find a gap that was left undisclosed.
 - **Container escape.** Isolation depends entirely on the container runtime. A
   payload with a working escape reaches the host and every credential on it.
   Bulkhead adds a layer; it does not add a guarantee.
-- **Exfiltration to an allowlisted host.** There is no TLS interception in v0, so
-  a payload that writes stolen material to an attacker-controlled repository on an
-  allowlisted forge is not blocked. This gap is real and was used in the 2026
-  campaigns. Closing it requires distinguishing reads from writes at allowlisted
-  hosts, which is not in v0. The conditional tier reduces the exposure by denying
-  forge hosts unless the user opts in; it does not remove it.
+- **Exfiltration through the registry.** Narrowed, not closed. The forge case is
+  gone — see below — but the registry has to be reachable during an install,
+  because that is what an install is, and any allowlisted host that accepts
+  writes is a channel. Credential stripping is what reduces this: an anonymous
+  payload has no publish token, and the environment filter is why. That is a
+  mitigation. `exfil-via-registry-during-install` reproduces it and is counted
+  as a failure in the published rate.
+- **Exfiltration to a code forge is closed, and not by inspecting traffic.**
+  There is still no TLS interception. The forge is simply not in the install
+  phase's allowlist: declared git dependencies are fetched by a separate resolve
+  phase, while no package code is running, and served during the install from a
+  read-only local mirror. There is no read to distinguish from a write because
+  there is no connection. This introduces its own surface, listed in 8.3.
 - **DNS-based exfiltration.** Data encoded in DNS queries is not detected or
   blocked.
 - **Compromised base image or package manager.** If the sandbox interior is
@@ -302,6 +318,35 @@ to read it and not find a gap that was left undisclosed.
   application when it later runs.
 - **Anything outside an install.** A malicious package that does nothing at
   install time and attacks in production is entirely out of scope.
+
+### 8.3 Surface introduced by two-phase resolution
+
+Closing the forge gap added components. They are smaller than what they replace,
+and they are not nothing.
+
+- **The resolve phase still touches a forge.** It runs `git` against an
+  attacker-influenceable repository. No project code executes there, no
+  credentials are present, and its egress is allowlisted and logged under
+  `npm-resolve.yaml` — but git has had its own CVEs and this is a real, if much
+  smaller, exposure.
+- **Fetched repositories are untrusted data.** The cache holds bytes an attacker
+  chose. It is mounted read-only into the install and must never be executed
+  from.
+- **A git dependency discovered only at install time fails the install.** The
+  resolve phase fetches what the manifest and lockfile declare. Anything
+  appearing later rewrites to a local path that does not exist and git fails
+  locally rather than reaching out. Fail-closed, and a real false-positive risk
+  against a near-zero budget.
+- **Manifest parsing is new attack surface.** `package.json` and
+  `package-lock.json` are parsed before any sandbox exists. An unparseable file
+  refuses the run rather than being skipped, but the parser itself runs on the
+  host.
+- **ssh-form dependencies are fetched over https.** npm writes ssh URLs into
+  lockfiles routinely. Bulkhead rewrites them to https to fetch, because it has
+  no key to authenticate with and https is the transport the proxy can enforce.
+  A genuinely private repository therefore fails rather than being fetched.
+- **Projects with git dependencies get a git binary in the install image.** A
+  slightly larger interior than a project without them, added only when needed.
 
 ### 8.2 Limits of the policy engine as written
 
