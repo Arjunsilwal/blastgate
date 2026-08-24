@@ -318,7 +318,7 @@ class TestTwoPhaseResolution:
     def test_the_git_cache_is_read_only_in_the_install(self, git_install):
         # A writable cache would be a channel from the install back into the
         # phase that has forge access.
-        from bulkhead.runner import CACHE_MOUNT
+        from bulkhead.resolve import CACHE_MOUNT
 
         project, audit, _ = git_install
         result = run_install(
@@ -332,7 +332,7 @@ class TestTwoPhaseResolution:
     def test_git_dependencies_without_the_flag_are_refused(self, git_install):
         # Fail closed. The alternative is an install that reaches a forge it
         # was never granted.
-        from bulkhead.runner import UnresolvableDependencyError
+        from bulkhead.resolve import UnresolvableDependencyError
 
         project, audit, _ = git_install
         with pytest.raises(UnresolvableDependencyError, match="resolve phase is not enabled"):

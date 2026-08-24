@@ -14,7 +14,7 @@ wired to any package manager. **Nothing in section 6 constitutes protection of a
 real install today.** See section 7 for the precise gap between design and
 implementation.
 
-Document version: 8. Last reviewed: 2026-08-22.
+Document version: 9. Last reviewed: 2026-08-22.
 
 **Design note, recorded because it departs from the v0 plan.** The plan specified
 environment variables "filtered by shape (prefix, and any name containing TOKEN,
@@ -231,8 +231,9 @@ connectivity would satisfy every isolation assertion while proving nothing.
 | The resolve phase cannot reach the registry | Separate allowlist naming forges only | `TestTwoPhaseResolution::test_the_resolve_policy_cannot_reach_the_registry` |
 | The git cache is read-only during install *(runtime)* | A writable cache would be a channel back into the phase with forge access | `TestTwoPhaseResolution::test_the_git_cache_is_read_only_in_the_install` |
 | Git dependencies without the resolve flag refuse the run *(constrains bulkhead)* | Fail closed rather than reach a forge | `TestTwoPhaseResolution::test_git_dependencies_without_the_flag_are_refused` |
-| A registry tarball URL is not mistaken for a git dependency | https URLs need `git+` or `.git` | `test_runner.py::TestGitSpecParsing::test_dependencies_come_from_the_lockfile_too` |
-| An unparseable manifest refuses the run *(constrains bulkhead)* | Guessing the dependency set is worse than stopping | `TestGitSpecParsing::test_an_unparseable_manifest_refuses_rather_than_guesses` |
+| A registry tarball URL is not mistaken for a git dependency | https URLs need `git+` or `.git` | `test_resolve.py::TestGitSpecParsing::test_dependencies_come_from_the_lockfile_too` |
+| An unparseable manifest refuses the run *(constrains bulkhead)* | Guessing the dependency set is worse than stopping | `test_resolve.py::TestGitSpecParsing::test_an_unparseable_manifest_refuses_rather_than_guesses` |
+| A shell metacharacter in a manifest cannot escape the clone script | Arguments are shell-quoted independently of the parser's charset | `test_resolve.py::TestCloneScript::test_shell_metacharacters_cannot_escape_the_script` |
 | The proxy image cannot enforce a stale allowlist *(constrains bulkhead)* | Image tag is derived from the source and allowlist contents, so a policy change forces a rebuild | `TestProxyImageFreshness::test_changing_an_allowlist_changes_the_image_tag` |
 
 Two deliberate properties worth stating because they surprise people:
@@ -286,6 +287,33 @@ both must refuse rather than degrade. The refusal is a property of bulkhead, not
 a protection against an attacker — it prevents a user from being misled into
 relying on an enforcement point that does not exist. It stops nothing that a
 malicious package does.
+
+### 7.1 Where the controls live
+
+Six modules, which is one more than the original plan allowed. The rule it
+broke was "five source modules; if a sixth appears, something grew that should
+not have", and something had grown: `runner.py` had reached 1,100 lines and was
+doing two unrelated jobs.
+
+The split follows purity, the same line that makes `policy.py` worth trusting.
+
+| Module | Owns | Pure |
+| --- | --- | --- |
+| `policy.py` | The allow/deny decision | yes |
+| `resolve.py` | What a project declares, and where fetched copies go | yes |
+| `audit.py` | The decision log and its anchors | filesystem only |
+| `proxy.py` | The enforcement point | network only |
+| `runner.py` | Topology, containers, and what crosses the boundary | no |
+| `cli.py` | Argument handling and exit codes | no |
+
+`resolve.py` executes nothing and starts no process, so it is exhaustively
+testable without a runtime — which matters because its mistakes are quiet ones.
+A version range misread as a repository sends the resolve phase to a forge for
+something that was never there. A repository misread as a version leaves the
+install to find a forge that is deliberately unreachable, failing late and
+confusingly. Neither shows up as a crash.
+
+Fetching stays in `runner.py`, because fetching is topology.
 
 ## 8. What is NOT defended against
 

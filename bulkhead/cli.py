@@ -16,6 +16,7 @@ from pathlib import Path
 import sys
 from typing import List, Optional
 
+from bulkhead import BulkheadError
 from bulkhead.audit import (
     AnchorStore,
     AuditError,
@@ -255,8 +256,11 @@ def main(args: Optional[List[str]] = None) -> int:
                 audit_path=audit_path,
                 enabled_conditions=set(parsed_args.allowed_conditions),
             )
-        except RunnerError as e:
-            # Every failure here is a refusal to run unprotected.
+        except BulkheadError as e:
+            # Every failure here is a refusal to run unprotected. Catching the
+            # base class rather than RunnerError is deliberate: resolution
+            # failures are refusals too, and one falling through as a traceback
+            # would look like a crash rather than a decision.
             sys.stderr.write(f"bh: refusing to run. {e}\n")
             return 2
 
