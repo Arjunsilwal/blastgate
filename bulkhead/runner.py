@@ -617,6 +617,49 @@ def ensure_proxy_image(runtime: str, context: Optional[Path] = None) -> str:
     return image
 
 
+def existing_proxy_containers(runtime: str) -> List[str]:
+    """Proxy containers already attached to the internal network."""
+    result = _run([
+        runtime, "network", "inspect", INTERNAL_NETWORK,
+        "--format", "{{range .Containers}}{{.Name}} {{end}}",
+    ])
+    if result.returncode != 0:
+        return []
+    return sorted(n for n in result.stdout.split() if n.startswith(f"{PROXY_IMAGE_REPO}-"))
+
+
+def assert_no_stale_proxy(runtime: str) -> None:
+    """Refuse to start a second sidecar on the internal network.
+
+    Every sidecar answers to the same network alias, so two of them make
+    resolution a coin toss. That is not a cosmetic clash. The other container
+    enforces whatever policy it was started with, and writes its decisions to
+    whatever audit path it was given - which may be a directory that no longer
+    exists. An install could then be refused by a policy nobody chose, or worse,
+    allowed by one, with the decision recorded somewhere the user never reads.
+
+    This happens after a run is killed rather than exiting: the container is
+    started with --rm but nothing removes it if the process supervising it dies
+    first.
+
+    Refusing rather than removing it. A running sidecar may belong to another
+    install in progress, and killing that one would drop its enforcement
+    mid-flight.
+    """
+    existing = existing_proxy_containers(runtime)
+    if not existing:
+        return
+    names = " ".join(existing)
+    raise RunnerError(
+        f"a bulkhead proxy is already attached to {INTERNAL_NETWORK}: {names}. "
+        f"Two sidecars share one network alias, so requests would be routed to "
+        f"either one and decisions could be enforced by the wrong policy and "
+        f"logged to the wrong file. If another install is running, wait for it. "
+        f"If one was left behind by a killed run, remove it with: "
+        f"{runtime} rm -f {names}"
+    )
+
+
 class ProxySidecar:
     """The proxy container, joined to both networks.
 
@@ -643,6 +686,7 @@ class ProxySidecar:
         self._started = False
 
     def start(self) -> "ProxySidecar":
+        assert_no_stale_proxy(self.runtime)
         self.audit_path.parent.mkdir(parents=True, exist_ok=True)
 
         argv = [

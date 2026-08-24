@@ -48,6 +48,56 @@ is yes and constrains what that can accomplish.
 | 3 | Enforcement — egress proxy, hash-chained audit log | Working |
 | 4 | Executable attack corpus | Working |
 
+## Does it break real installs?
+
+The corpus measures what bulkhead stops. This measures what it breaks, which is
+the number that decides whether anyone keeps it switched on.
+
+Every project is installed twice: once in a plain container with full network
+access, and once under bulkhead. Without that control a failure means nothing —
+the project might simply be broken, and counting that as a false positive would
+hide real breakage in noise.
+
+```bash
+python scripts/compat_check.py
+```
+
+**8 of 8 projects install unchanged under bulkhead. False positive rate: 0%.**
+
+| Project | Pinned at | Verdict | Denied hosts |
+| --- | --- | --- | --- |
+| `express` | `v5.2.1` | compatible | — |
+| `axios` | `v1.19.0` | compatible | — |
+| `got` | `v15.1.0` | compatible | — |
+| `prettier` | `3.9.6` | compatible | — |
+| `date-fns` | `v4.4.0` | excluded | — |
+| esbuild `0.24.0` | postinstall binary | compatible | — |
+| sharp `0.33.5` | native module | compatible | — |
+| `is-odd#3.0.1` | git dependency | compatible | `codeload.github.com` |
+| webpack + eslint | deep transitive graph | compatible | — |
+
+`date-fns` is excluded because its *control* install also fails: `oxlint@^1.65.0`
+floats forward to a release whose peer requirement its pinned sibling cannot
+satisfy, so the tag does not install today under any sandbox. That is upstream's
+conflict, not bulkhead's, and counting it either way would be dishonest.
+
+### Why this number is weaker than it looks
+
+Read it as "no false positives found in eight projects", not as a rate.
+
+- **Eight projects is a small sample, and all of them are npm.** pypi and cargo
+  have allowlists and no compatibility evidence at all.
+- **The two hardest cases passed for reasons that have nothing to do with this
+  design.** esbuild and sharp were included because they historically downloaded
+  binaries from GitHub releases at postinstall, which bulkhead would deny. Both
+  now ship platform binaries as npm optional dependencies served from the
+  registry. The ecosystem moved somewhere convenient; that is luck, and it can
+  move back.
+- **Only one case exercises git dependencies**, and none has a lockfile
+  containing one, which is where transitive git dependencies actually appear.
+- **Untested entirely:** private registries, authenticated `.npmrc`, workspace
+  monorepos, yarn, and pnpm.
+
 ## What the attack corpus scores
 
 `tests/attacks/` holds executable scenarios. Each one is run against the real

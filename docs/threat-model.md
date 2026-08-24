@@ -14,7 +14,7 @@ wired to any package manager. **Nothing in section 6 constitutes protection of a
 real install today.** See section 7 for the precise gap between design and
 implementation.
 
-Document version: 10. Last reviewed: 2026-08-22.
+Document version: 12. Last reviewed: 2026-08-22.
 
 **Design note, recorded because it departs from the v0 plan.** The plan specified
 environment variables "filtered by shape (prefix, and any name containing TOKEN,
@@ -238,6 +238,7 @@ connectivity would satisfy every isolation assertion while proving nothing.
 | A registry tarball URL is not mistaken for a git dependency | https URLs need `git+` or `.git` | `test_resolve.py::TestGitSpecParsing::test_dependencies_come_from_the_lockfile_too` |
 | An unparseable manifest refuses the run *(constrains bulkhead)* | Guessing the dependency set is worse than stopping | `test_resolve.py::TestGitSpecParsing::test_an_unparseable_manifest_refuses_rather_than_guesses` |
 | A shell metacharacter in a manifest cannot escape the clone script | Arguments are shell-quoted independently of the parser's charset | `test_resolve.py::TestCloneScript::test_shell_metacharacters_cannot_escape_the_script` |
+| A sidecar left by a killed run cannot serve the next one *(constrains bulkhead)* | Refuses to start when the internal network already has a proxy | `test_topology.py::TestStaleSidecar::test_a_stale_proxy_on_the_network_is_refused` |
 | The proxy image cannot enforce a stale allowlist *(constrains bulkhead)* | Image tag is derived from the source and allowlist contents, so a policy change forces a rebuild | `TestProxyImageFreshness::test_changing_an_allowlist_changes_the_image_tag` |
 
 Two deliberate properties worth stating because they surprise people:
@@ -416,6 +417,32 @@ and they are not nothing.
 - **The proxy will see hostnames, not content.** Without TLS interception the
   enforcement point knows the destination and nothing else. Volume, timing, and
   payload are invisible.
+- **The false-positive budget is verified against eight npm projects and
+  nothing else.** `scripts/compat_check.py` installs each one twice, with and
+  without bulkhead, and currently finds no false positives. Eight is a small
+  sample, all of it npm; pypi and cargo have allowlists and no compatibility
+  evidence at all. Read the result as "none found in eight projects", not as a
+  rate.
+- **Compatibility currently depends on an ecosystem convention that could
+  change.** The two hardest cases in that check, esbuild and sharp, were chosen
+  because they historically downloaded binaries from GitHub releases during
+  postinstall — traffic bulkhead denies. Both now ship platform binaries as npm
+  optional dependencies served from the registry, so they pass for reasons that
+  have nothing to do with this design. If packages move back toward fetching
+  binaries from arbitrary hosts at install time, the false-positive rate rises
+  sharply and no code change here caused it.
+- **Two installs cannot run at once.** Every sidecar answers to the same network
+  alias, so a second one makes resolution a coin toss: requests could be
+  enforced by either container's policy and logged to either container's file.
+  Detected and refused rather than raced, but the underlying limit is real and
+  the remedy is to wait rather than to parallelise.
+- **A killed run leaves its sidecar behind.** The container is started with
+  `--rm`, which does not help when the process supervising it is killed first.
+  Found in practice: a run cancelled mid-install left a proxy attached to the
+  internal network for two hours, and the next run was refused by the policy
+  that container happened to be holding while its own decisions went to an audit
+  path inside a deleted directory. The next run now refuses with the command to
+  clean up, but nothing reaps the container on its own.
 - **Nothing binds an install to its declared ecosystem.** Running an `npm` install
   under the `pypi` allowlist is a user error the tool does not currently catch.
 - **Unicode and IDN hostnames are rejected outright**, not punycode-normalized.

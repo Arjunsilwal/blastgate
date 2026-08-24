@@ -205,3 +205,48 @@ class TestNetworkIntegrity:
     def test_both_networks_exist(self):
         assert network_exists(INTERNAL_NETWORK, RUNTIME)
         assert network_exists(EXTERNAL_NETWORK, RUNTIME)
+
+
+class TestStaleSidecar:
+    """A sidecar left behind by a killed run must not silently serve the next one.
+
+    Found by killing a compatibility run mid-install. The container is started
+    with --rm, but nothing removes it when the process supervising it is killed
+    first, so it stayed attached to the internal network for two hours holding
+    the shared alias. The next run resolved the alias to it, was refused by the
+    policy that container happened to be enforcing, and had its decisions
+    written to an audit path inside a temp directory that no longer existed.
+
+    Being denied by the wrong policy is loud. Being allowed by it, with the
+    decision logged where nobody reads, is not.
+    """
+
+    def test_a_stale_proxy_on_the_network_is_refused(self, project):
+        from bulkhead.runner import (
+            PROXY_IMAGE_REPO,
+            ProxySidecar,
+            assert_no_stale_proxy,
+            existing_proxy_containers,
+        )
+
+        name = f"{PROXY_IMAGE_REPO}-stale-test"
+        subprocess.run([RUNTIME, "rm", "-f", name], capture_output=True)
+        subprocess.run(
+            [RUNTIME, "run", "-d", "--name", name, "--network", INTERNAL_NETWORK,
+             IMAGE, "sleep", "60"],
+            capture_output=True,
+        )
+        try:
+            assert name in existing_proxy_containers(RUNTIME)
+            with pytest.raises(RunnerError, match="already attached"):
+                assert_no_stale_proxy(RUNTIME)
+            # And the sidecar itself refuses to start rather than racing it.
+            with pytest.raises(RunnerError, match="already attached"):
+                ProxySidecar("npm", audit_path=project / "audit.log", runtime=RUNTIME).start()
+        finally:
+            subprocess.run([RUNTIME, "rm", "-f", name], capture_output=True)
+
+    def test_no_stale_proxy_is_the_normal_case(self):
+        from bulkhead.runner import assert_no_stale_proxy
+
+        assert_no_stale_proxy(RUNTIME) is None
