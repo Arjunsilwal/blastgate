@@ -1,0 +1,29 @@
+id: git-dependency-still-installs
+title: A project with a git dependency installs with every forge denied
+chain_link: 0
+ecosystem: npm
+source: constructed
+expect: allowed
+requires: sandbox
+check: install
+
+enable:
+  - git-dependencies
+
+manifest:
+  dependencies:
+    is-odd: "github:jonschlinkert/is-odd"
+
+command: ["npm", "install", "--no-audit", "--no-fund"]
+
+expect_present:
+  - node_modules/is-odd
+
+note: >
+  The false-positive guard for two-phase resolution, and the scenario most
+  likely to catch a real break. Closing the forge gap by breaking the feature it
+  belonged to would not be closing it, and a tool that breaks legitimate
+  installs is uninstalled within the hour.
+  This exercises the whole path: the manifest is parsed, the resolve phase
+  fetches while no package code runs, and the install reads from the read-only
+  mirror with github.com denied throughout.

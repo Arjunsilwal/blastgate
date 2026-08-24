@@ -59,10 +59,12 @@ python scripts/attack_report.py --write
 ```
 
 <!-- corpus:begin -->
-**8 of 9 scenarios prevented (89%).**
+**11 of 13 scenarios prevented (85%).**
 
 | Scenario | Link | Expected | Result |
 | --- | --- | --- | --- |
+| `audit-replacement-is-detected` | 6 | not_prevented | known-gap ⚠ |
+| `audit-truncation-is-detected` | 6 | denied | prevented |
 | `egress-forge-without-opt-in` | 5 | denied | prevented |
 | `egress-lookalike-registry` | 5 | denied | prevented |
 | `egress-nonstandard-port` | 5 | denied | prevented |
@@ -70,10 +72,13 @@ python scripts/attack_report.py --write
 | `egress-unlisted-host` | 5 | denied | prevented |
 | `exfil-over-tls-to-allowlisted-host` | 5 | denied | prevented |
 | `exfil-via-registry-during-install` | 5 | not_prevented | known-gap ⚠ |
+| `fetch-phase-runs-no-lifecycle-scripts` | 3 | denied | prevented |
+| `git-dependency-still-installs` | 0 | allowed | allowed |
 | `harvest-host-credential-files` | 4 | denied | prevented |
 | `registry-traffic-still-works` | 0 | allowed | allowed |
 
 Counted as failures because they are:
+- `audit-replacement-is-detected` — Attacker replaces the log and re-anchors it with a chain of their own
 - `exfil-via-registry-during-install` — Payload uses the package registry itself as the exfiltration channel
 <!-- corpus:end -->
 
@@ -82,6 +87,11 @@ scenario that could not run as a failure too. A corpus that only tallies the
 cases it wins produces a nicer number and a worse tool. A test in
 `tests/test_attacks.py` fails if this README stops matching what the corpus
 actually scores.
+
+This number went **down** when the corpus grew, from 88% to 85%. Nothing
+regressed; two disclosed gaps are now counted against a larger set. A rate that
+can only rise is a curated one, and there is a test asserting that adding an
+honest gap lowers it.
 
 ## What actually stops a payload
 

@@ -1,0 +1,27 @@
+id: fetch-phase-runs-no-lifecycle-scripts
+title: Payload tries to execute at install time during the fetch that precedes it
+chain_link: 3
+ecosystem: npm
+source: constructed
+expect: denied
+requires: sandbox
+check: image
+image: alpine/git:latest
+
+absent:
+  - /usr/local/bin/npm
+  - /usr/local/bin/node
+  - /usr/bin/node
+  - /usr/bin/npm
+  - /usr/local/bin/yarn
+  - /usr/bin/python3
+
+note: >
+  The property two-phase resolution rests on. The resolve phase reaches a forge,
+  which is the one moment in the design where attacker-controlled bytes and
+  network access meet - so it matters that nothing there can run a package
+  lifecycle script.
+  Weaker evidence than the rest of the corpus, and marked so deliberately: this
+  checks a precondition rather than observing an attack fail. A lifecycle script
+  cannot run where no package manager and no interpreter exist to run it. It
+  does not prove git itself is safe, which section 8.3 discloses separately.

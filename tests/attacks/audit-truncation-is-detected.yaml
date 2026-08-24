@@ -1,0 +1,18 @@
+id: audit-truncation-is-detected
+title: Attacker deletes the denial entries from the end of the audit log
+chain_link: 6
+ecosystem: npm
+source: constructed
+expect: denied
+requires: sandbox
+check: audit
+tamper: truncate
+
+note: >
+  A hash chain cannot detect its own truncation: a shorter prefix of a valid
+  chain is a valid chain, so removing the most recent entries leaves something
+  that still verifies. Deleting the denials is exactly what an attacker who
+  reached the log would do, because it turns a record of refused exfiltration
+  into a clean install.
+  Detected now by the anchor store, which is written by the host-side runner
+  rather than by the proxy that writes the log.

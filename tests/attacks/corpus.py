@@ -20,7 +20,8 @@ CORPUS_DIR = Path(__file__).resolve().parent
 
 EXPECT_VALUES = frozenset({"denied", "allowed", "not_prevented"})
 REQUIRES_VALUES = frozenset({"policy", "proxy", "sandbox"})
-CHECK_VALUES = frozenset({"egress", "filesystem"})
+CHECK_VALUES = frozenset({"egress", "filesystem", "install", "audit", "image"})
+TAMPER_VALUES = frozenset({"truncate", "replace-both-stores"})
 
 REQUIRED_FIELDS = ("id", "title", "chain_link", "ecosystem", "source", "expect", "requires")
 
@@ -50,6 +51,15 @@ class Scenario:
     target: Optional[Target] = None
     paths: Sequence[str] = field(default_factory=tuple)
     enable: Sequence[str] = field(default_factory=tuple)
+    # install scenarios
+    manifest: Optional[dict] = None
+    command: Sequence[str] = field(default_factory=tuple)
+    expect_present: Sequence[str] = field(default_factory=tuple)
+    # image scenarios
+    image: Optional[str] = None
+    absent: Sequence[str] = field(default_factory=tuple)
+    # audit scenarios
+    tamper: Optional[str] = None
     path: Optional[Path] = None
 
     @property
@@ -99,6 +109,31 @@ def parse_scenario(data: dict, source: Path) -> Scenario:
     if check == "filesystem" and not paths:
         raise ScenarioError(f"{source.name}: a filesystem scenario needs a non-empty 'paths'")
 
+    manifest = data.get("manifest")
+    command = tuple(data.get("command", ()))
+    expect_present = tuple(data.get("expect_present", ()))
+    if check == "install":
+        if not isinstance(manifest, dict) or not manifest:
+            raise ScenarioError(f"{source.name}: an install scenario needs a 'manifest'")
+        if not command:
+            raise ScenarioError(f"{source.name}: an install scenario needs a 'command'")
+
+    image = data.get("image")
+    absent = tuple(data.get("absent", ()))
+    if check == "image":
+        if not image:
+            raise ScenarioError(f"{source.name}: an image scenario needs an 'image'")
+        if not absent:
+            raise ScenarioError(f"{source.name}: an image scenario needs a non-empty 'absent'")
+
+    tamper = data.get("tamper")
+    if check == "audit":
+        if tamper not in TAMPER_VALUES:
+            raise ScenarioError(
+                f"{source.name}: an audit scenario needs 'tamper' to be one of "
+                f"{sorted(TAMPER_VALUES)}, got {tamper!r}"
+            )
+
     if data["id"] != source.stem:
         raise ScenarioError(
             f"{source.name}: id {data['id']!r} does not match the filename"
@@ -117,6 +152,12 @@ def parse_scenario(data: dict, source: Path) -> Scenario:
         target=target,
         paths=paths,
         enable=tuple(data.get("enable", ())),
+        manifest=manifest,
+        command=command,
+        expect_present=expect_present,
+        image=image,
+        absent=absent,
+        tamper=tamper,
         path=source,
     )
 

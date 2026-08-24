@@ -106,6 +106,43 @@ class TestSchema:
         with pytest.raises(ScenarioError, match="paths"):
             parse_scenario(data, tmp_path / "s.yaml")
 
+    def test_install_scenario_needs_a_manifest_and_command(self, tmp_path):
+        base = {
+            "id": "s", "title": "t", "chain_link": 0, "ecosystem": "npm",
+            "source": "constructed", "expect": "allowed", "requires": "sandbox",
+            "check": "install",
+        }
+        with pytest.raises(ScenarioError, match="manifest"):
+            parse_scenario(dict(base), tmp_path / "s.yaml")
+        with pytest.raises(ScenarioError, match="command"):
+            parse_scenario(
+                dict(base, manifest={"dependencies": {"a": "github:o/r"}}),
+                tmp_path / "s.yaml",
+            )
+
+    def test_image_scenario_needs_an_image_and_absent_paths(self, tmp_path):
+        base = {
+            "id": "s", "title": "t", "chain_link": 3, "ecosystem": "npm",
+            "source": "constructed", "expect": "denied", "requires": "sandbox",
+            "check": "image",
+        }
+        with pytest.raises(ScenarioError, match="image"):
+            parse_scenario(dict(base), tmp_path / "s.yaml")
+        with pytest.raises(ScenarioError, match="absent"):
+            parse_scenario(dict(base, image="alpine"), tmp_path / "s.yaml")
+
+    @pytest.mark.parametrize("tamper", [None, "", "delete-everything", "truncat"])
+    def test_audit_scenario_needs_a_known_tamper_mode(self, tamper, tmp_path):
+        # An unknown mode would otherwise report not-runnable, which counts as
+        # a failure and would look like a regression rather than a typo.
+        data = {
+            "id": "s", "title": "t", "chain_link": 6, "ecosystem": "npm",
+            "source": "constructed", "expect": "denied", "requires": "sandbox",
+            "check": "audit", "tamper": tamper,
+        }
+        with pytest.raises(ScenarioError, match="tamper"):
+            parse_scenario(data, tmp_path / "s.yaml")
+
     def test_a_malformed_scenario_is_loud_not_skipped(self, tmp_path):
         # Silently dropping an unparseable scenario would report a better
         # number than the corpus earned.
@@ -143,6 +180,17 @@ class TestScoring:
         # A scenario that cannot run is not a scenario that passed.
         outcome = Outcome(scenario(), NOT_RUNNABLE, "no runtime")
         assert outcome.passed is False
+
+    def test_adding_an_honest_gap_lowers_the_rate(self):
+        # The corpus growing more honest should be able to move the number
+        # down. A rate that can only rise is a curated one.
+        before = Report([
+            Outcome(scenario(id="a"), PREVENTED, ""),
+            Outcome(scenario(id="b"), PREVENTED, ""),
+        ])
+        after = Report(list(before.outcomes) + [Outcome(scenario(id="c"), KNOWN_GAP, "")])
+        assert before.rate == 100.0
+        assert after.rate < before.rate
 
     def test_the_rate_counts_gaps_and_unrunnable_scenarios(self):
         report = Report([

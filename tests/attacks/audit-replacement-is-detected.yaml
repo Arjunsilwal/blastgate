@@ -1,0 +1,19 @@
+id: audit-replacement-is-detected
+title: Attacker replaces the log and re-anchors it with a chain of their own
+chain_link: 6
+ecosystem: npm
+source: constructed
+expect: not_prevented
+requires: sandbox
+check: audit
+tamper: replace-both-stores
+
+note: >
+  The limit anchoring does not close, kept executable so it cannot be quietly
+  believed closed. Anchoring raises the bar from writing one file to writing
+  two consistently, in two directories, the second chained across runs. It is
+  not provenance.
+  An attacker with write access to both stores rebuilds both and the result
+  verifies. Closing this needs an anchor this machine cannot alter - an
+  external service, a key held in an OS keychain, or an offline record - none
+  of which bulkhead has. Counted as a failure because it is one.
