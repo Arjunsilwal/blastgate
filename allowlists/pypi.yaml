@@ -11,6 +11,15 @@ wildcard:
   - pattern: "*.pythonhosted.org"
     reason: "Python package distribution CDN endpoints"
 
+# Conditional hosts are NOT reachable during an install.
+#
+# The git-dependencies condition no longer opens these hosts to the install
+# phase. It permits the separate resolve phase to run, which fetches declared
+# git dependencies under pypi-resolve.yaml while no package code is executing.
+# By the time an install runs, these entries are dead: the payload has no route
+# to a forge and no rule that would allow one.
+#
+# They stay listed because policy still has to name them to deny them.
 conditional:
   - host: github.com
     condition: git-dependencies

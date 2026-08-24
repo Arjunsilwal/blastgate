@@ -62,7 +62,7 @@ hide real breakage in noise.
 python scripts/compat_check.py
 ```
 
-**15 of 15 projects install unchanged under bulkhead. No false positives found.**
+**16 of 16 projects install unchanged under bulkhead. No false positives found.**
 
 | Project | Ecosystem | Why it is here | Verdict |
 | --- | --- | --- | --- |
@@ -75,9 +75,10 @@ python scripts/compat_check.py
 | `cryptography` | pypi | compiled wheel | compatible |
 | `pendulum` | pypi | build isolation fetches its own backend | compatible |
 | `fastapi` `uvicorn` | pypi | wide transitive graph | compatible |
+| `requests` (git) | pypi | git dependency via the resolve phase | compatible |
 | `serde` | cargo | sparse index plus crate downloads | compatible |
 | `tokio` `clap` | cargo | hundreds of transitive crates | compatible |
-| `anyhow` (git) | cargo | git dependency, no resolve phase | compatible |
+| `anyhow` (git) | cargo | git dependency via the resolve phase | compatible |
 | `date-fns` | npm | — | **excluded** |
 
 `date-fns` is excluded because its *control* install fails too: `oxlint@^1.65.0`
@@ -93,7 +94,7 @@ next two. Deterministic failures skip the retries.
 
 ### Why this number is weaker than it looks
 
-Read it as "no false positives found in fifteen projects", not as a rate.
+Read it as "no false positives found in sixteen projects", not as a rate.
 
 - **The two hardest npm cases passed for reasons unrelated to this design.**
   esbuild and sharp were included because they historically downloaded binaries
@@ -101,8 +102,8 @@ Read it as "no false positives found in fifteen projects", not as a rate.
   platform binaries as npm optional dependencies served from the registry. The
   ecosystem moved somewhere convenient; that is luck, and it can move back.
 - **The pypi and cargo cases are synthetic manifests**, not cloned projects.
-  They exercise real packages and real transitive graphs, but not real
-  repository layouts.
+  They exercise real packages, real transitive graphs and real git
+  dependencies, but not real repository layouts.
 - **Untested entirely:** private registries, authenticated `.npmrc`, workspace
   monorepos, yarn, and pnpm.
 
@@ -167,7 +168,7 @@ tests are built around:
 tests/test_end_to_end.py::TestTheWholeThing::test_a_payload_that_ignores_the_proxy_is_still_blocked
 ```
 
-### Git dependencies never open a forge (npm)
+### Git dependencies never open a forge
 
 A dependency like `"is-odd": "github:jonschlinkert/is-odd"` used to require
 putting `github.com` in the allowlist for the whole install — and a proxy that
@@ -196,16 +197,18 @@ npm          DENY   codeload.github.com   ← the install tried; it was refused
 The install succeeds anyway, from the mirror. There is no read to distinguish
 from a write because there is no connection.
 
-This is a narrowing, not a solution, in two ways. The registry has to stay
-reachable during an install, and a registry accepts writes — that residual is
-the corpus scenario `exfil-via-registry-during-install`, counted as a failure
-below.
+This works the same way for all three ecosystems. npm, pip and cargo all shell
+out to git, so the same mirror and the same rewriting serve all of them; only
+the spelling of a dependency differs between manifests. cargo needs one extra
+push, because it fetches with libgit2 which ignores `url.insteadOf` —
+`CARGO_NET_GIT_FETCH_WITH_CLI` makes it use the git CLI so the redirection
+applies.
 
-And it is **npm only**. Reading declared git dependencies is manifest-specific,
-so pypi and cargo have no resolve phase and `--allow git-dependencies` keeps its
-original meaning there: the forge stays reachable for the whole install. `bh run`
-warns when that happens. Removing the grant instead would not close the gap for
-them, it would only break every project with a git dependency.
+It is a narrowing, not a solution. The registry has to stay reachable during an
+install, and a registry accepts writes — that residual is the corpus scenario
+`exfil-via-registry-during-install`, counted as a failure below. And an
+ecosystem added later has no parser until one is written, so it keeps the older
+arrangement and `bh run` warns when that path is taken.
 
 The audit log is written to a directory mounted into the proxy container and
 nowhere else, so the sandbox cannot read or delete it. Pointing `--audit` inside

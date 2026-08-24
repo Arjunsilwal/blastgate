@@ -145,13 +145,17 @@ CASES: List[Case] = [
                               'clap = { version = "4", features = ["derive"] }\n',
                 "src/main.rs": "fn main() {}\n"},
          why="hundreds of transitive crates"),
+    Case("pypi-git-dependency", "manifest", ecosystem="pypi",
+         files={"requirements.txt":
+                "git+https://github.com/psf/requests@v2.32.3#egg=requests\n"},
+         why="git dependency via the resolve phase"),
     Case("cargo-git-dependency", "manifest", ecosystem="cargo",
          files={"Cargo.toml": '[package]\nname = "compat"\nversion = "0.1.0"\n'
                               'edition = "2021"\n\n[dependencies]\n'
                               'anyhow = { git = "https://github.com/dtolnay/anyhow", '
                               'tag = "1.0.93" }\n',
                 "src/main.rs": "fn main() {}\n"},
-         why="git dependency in an ecosystem with no resolve phase"),
+         why="git dependency via the resolve phase"),
 ]
 
 
@@ -219,8 +223,8 @@ def image_for(project: Path, runtime: str, ecosystem: str = "npm") -> str:
     its control for a reason that had nothing to do with network policy and
     got excluded from the measurement it existed to provide.
     """
-    if ecosystem == "npm" and parse_git_dependencies(project):
-        return ensure_install_image(runtime)
+    if parse_git_dependencies(project, ecosystem):
+        return ensure_install_image(runtime, ecosystem)
     return ECOSYSTEMS[ecosystem]["image"]
 
 

@@ -182,12 +182,17 @@ class TestInstallPhaseConditions:
         assert install_phase_conditions("npm", {"git-dependencies"}) == set()
 
     @pytest.mark.parametrize("ecosystem", ["pypi", "cargo"])
-    def test_ecosystems_without_a_resolve_phase_keep_the_old_grant(self, ecosystem):
+    def test_pypi_and_cargo_also_move_forge_access_into_the_resolve_phase(self, ecosystem):
+        from bulkhead.resolve import install_phase_conditions
+
+        assert install_phase_conditions(ecosystem, {"git-dependencies"}) == set()
+
+    def test_an_ecosystem_without_a_parser_keeps_the_old_grant(self):
         # Weaker, and deliberately so: removing the grant without providing the
         # phase that replaces it breaks the install instead of protecting it.
         from bulkhead.resolve import install_phase_conditions
 
-        assert install_phase_conditions(ecosystem, {"git-dependencies"}) == {"git-dependencies"}
+        assert install_phase_conditions("golang", {"git-dependencies"}) == {"git-dependencies"}
 
     def test_unrelated_conditions_are_never_stripped(self):
         from bulkhead.resolve import install_phase_conditions
@@ -205,7 +210,144 @@ class TestInstallPhaseConditions:
         # would reintroduce the exact regression this class exists for.
         from bulkhead.resolve import RESOLVE_CAPABLE_ECOSYSTEMS
 
-        assert RESOLVE_CAPABLE_ECOSYSTEMS == {"npm"}, (
+        assert RESOLVE_CAPABLE_ECOSYSTEMS == {"npm", "pypi", "cargo"}, (
             "adding an ecosystem here requires parse_git_dependencies to read "
             "its manifests, or --allow git-dependencies grants nothing there"
         )
+
+
+class TestPipRequirements:
+    """pip spells a git dependency differently from npm: @ref, not #ref."""
+
+    @pytest.mark.parametrize("line,host,path,ref,name", [
+        ("git+https://github.com/o/r.git@v1#egg=pkg", "github.com", "o/r", "v1", "pkg"),
+        ("pkg @ git+https://github.com/o/r@main", "github.com", "o/r", "main", "pkg"),
+        ("-e git+https://github.com/o/r#egg=pkg", "github.com", "o/r", None, "pkg"),
+        ("git+ssh://git@gitlab.com/o/r.git", "gitlab.com", "o/r", None, "r"),
+    ])
+    def test_recognised_requirements(self, line, host, path, ref, name):
+        from bulkhead.resolve import parse_pip_requirement
+
+        dependency = parse_pip_requirement(line)
+        assert dependency is not None
+        assert (dependency.host, dependency.path, dependency.ref) == (host, path, ref)
+        assert dependency.name == name
+
+    @pytest.mark.parametrize("line", [
+        "requests==2.32.3", "flask>=2.0,<3", "# a comment", "",
+        "-r other-requirements.txt", "./local-package", "https://example.test/x.whl",
+    ])
+    def test_ordinary_requirements_are_not_git_dependencies(self, line):
+        from bulkhead.resolve import parse_pip_requirement
+
+        assert parse_pip_requirement(line) is None
+
+    def test_unencrypted_git_is_refused(self):
+        from bulkhead.resolve import parse_pip_requirement
+
+        with pytest.raises(UnresolvableDependencyError, match="unencrypted"):
+            parse_pip_requirement("git+git://github.com/o/r")
+
+    def test_requirements_and_pyproject_are_both_read(self, tmp_path):
+        from bulkhead.resolve import parse_git_dependencies
+
+        (tmp_path / "requirements.txt").write_text(
+            "requests==2.32.3\ngit+https://github.com/o/from-requirements#egg=a\n"
+        )
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "x"\nversion = "1"\n'
+            'dependencies = ["b @ git+https://github.com/o/from-pyproject"]\n'
+        )
+        found = {d.path for d in parse_git_dependencies(tmp_path, "pypi")}
+        assert found == {"o/from-requirements", "o/from-pyproject"}
+
+
+class TestCargoSources:
+    def test_a_git_dependency_in_the_manifest(self, tmp_path):
+        from bulkhead.resolve import parse_git_dependencies
+
+        (tmp_path / "Cargo.toml").write_text(
+            '[package]\nname = "x"\nversion = "0.1.0"\n\n[dependencies]\n'
+            'anyhow = { git = "https://github.com/dtolnay/anyhow", tag = "1.0.93" }\n'
+            'serde = "1.0"\n'
+        )
+        found = parse_git_dependencies(tmp_path, "cargo")
+        assert [d.path for d in found] == ["dtolnay/anyhow"]
+        assert found[0].ref == "1.0.93"
+
+    def test_the_crates_registry_is_not_a_git_dependency(self, tmp_path):
+        # Cargo.lock spells the registry as a GitHub URL. Reading it as a git
+        # dependency would send the resolve phase after the whole index.
+        from bulkhead.resolve import parse_cargo_source
+
+        assert parse_cargo_source(
+            "serde", "registry+https://github.com/rust-lang/crates.io-index"
+        ) is None
+
+    def test_git_sources_come_from_the_lockfile_too(self, tmp_path):
+        from bulkhead.resolve import parse_git_dependencies
+
+        (tmp_path / "Cargo.lock").write_text(
+            '[[package]]\nname = "anyhow"\nversion = "1.0.93"\n'
+            'source = "git+https://github.com/dtolnay/anyhow?tag=1.0.93#abc123"\n\n'
+            '[[package]]\nname = "serde"\nversion = "1.0.0"\n'
+            'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+        )
+        found = parse_git_dependencies(tmp_path, "cargo")
+        assert [d.path for d in found] == ["dtolnay/anyhow"]
+        assert found[0].ref == "1.0.93"
+
+    def test_dev_and_build_dependencies_are_read(self, tmp_path):
+        from bulkhead.resolve import parse_git_dependencies
+
+        (tmp_path / "Cargo.toml").write_text(
+            '[package]\nname = "x"\nversion = "0.1.0"\n\n[dev-dependencies]\n'
+            'a = { git = "https://github.com/o/dev" }\n\n[build-dependencies]\n'
+            'b = { git = "https://github.com/o/build" }\n'
+        )
+        found = {d.path for d in parse_git_dependencies(tmp_path, "cargo")}
+        assert found == {"o/dev", "o/build"}
+
+    def test_an_unparseable_manifest_refuses(self, tmp_path):
+        from bulkhead.resolve import parse_git_dependencies
+
+        (tmp_path / "Cargo.toml").write_text("[package\nthis is not toml")
+        with pytest.raises(ResolveError, match="Refusing to run"):
+            parse_git_dependencies(tmp_path, "cargo")
+
+
+class TestEveryCapableEcosystemHasAParser:
+    def test_no_ecosystem_is_listed_without_a_parser(self, tmp_path):
+        # The regression this guards was exactly this mismatch: an ecosystem
+        # whose grant was removed with nothing to replace it.
+        from bulkhead.resolve import RESOLVE_CAPABLE_ECOSYSTEMS, parse_git_dependencies
+
+        for ecosystem in RESOLVE_CAPABLE_ECOSYSTEMS:
+            assert parse_git_dependencies(tmp_path, ecosystem) == []
+
+    def test_each_capable_ecosystem_has_a_resolve_allowlist(self):
+        from bulkhead.policy import load_policy
+        from bulkhead.resolve import RESOLVE_CAPABLE_ECOSYSTEMS, resolve_policy_for
+
+        for ecosystem in RESOLVE_CAPABLE_ECOSYSTEMS:
+            policy = load_policy(resolve_policy_for(ecosystem))
+            assert policy.evaluate("github.com").allowed is True
+
+    @pytest.mark.parametrize("ecosystem,registry", [
+        ("npm", "registry.npmjs.org"), ("pypi", "pypi.org"), ("cargo", "crates.io"),
+    ])
+    def test_a_resolve_policy_denies_its_own_registry(self, ecosystem, registry):
+        # Resolution fetches git refs. Anything reaching for a package index
+        # under a resolve policy is not resolution.
+        from bulkhead.policy import load_policy
+        from bulkhead.resolve import resolve_policy_for
+
+        policy = load_policy(resolve_policy_for(ecosystem))
+        assert policy.evaluate(registry).allowed is False
+
+    def test_each_capable_ecosystem_has_a_git_capable_image(self):
+        from bulkhead.resolve import RESOLVE_CAPABLE_ECOSYSTEMS
+        from bulkhead.runner import install_dockerfile_for
+
+        for ecosystem in RESOLVE_CAPABLE_ECOSYSTEMS:
+            assert install_dockerfile_for(ecosystem).is_file()

@@ -19,6 +19,11 @@ import re
 import shlex
 from typing import Dict, Iterable, List, Optional, Sequence
 
+try:                                  # Python 3.11+
+    import tomllib
+except ModuleNotFoundError:           # 3.10, via the backport
+    import tomli as tomllib
+
 from bulkhead import BulkheadError
 
 
@@ -54,24 +59,34 @@ FORGE_PREFIXES = {
 RESOLVE_ONLY_CONDITIONS = frozenset({"git-dependencies"})
 
 # ...but only where a resolve phase exists to do the fetching. Reading git
-# dependencies is manifest-specific and only npm's manifests are implemented.
+# dependencies is manifest-specific, so each ecosystem needs a parser before it
+# can be listed here.
 #
-# Stripping the condition everywhere was a regression: for pypi and cargo it
-# removed the grant without providing the phase that replaces it, so
-# --allow git-dependencies silently granted nothing and any project with a git
-# dependency failed. Caught by running the compatibility check against cargo.
-#
-# For those ecosystems the condition keeps its old meaning, which means the
-# forge exfiltration gap is still open there. That is a disclosed difference,
-# not a quiet one: see docs/threat-model.md section 8.1.
-RESOLVE_CAPABLE_ECOSYSTEMS = frozenset({"npm"})
+# Stripping the condition without a parser to match is a regression, not a
+# hardening: it removes the grant while providing nothing to replace it, so
+# --allow git-dependencies silently grants nothing and every project with a git
+# dependency fails. That shipped once, for pypi and cargo, and was caught by the
+# compatibility check rather than by a test. The test now exists.
+RESOLVE_CAPABLE_ECOSYSTEMS = frozenset({"npm", "pypi", "cargo"})
+
+
+def resolve_policy_for(ecosystem: str) -> str:
+    """The allowlist the resolve phase runs under, per ecosystem.
+
+    Separate files rather than one shared policy. They are near-identical
+    today, and each one has to be able to deny its own registry independently:
+    resolution fetches git refs, so anything reaching for a package index under
+    a resolve policy is not resolution.
+    """
+    return f"{ecosystem}-resolve"
 
 
 def install_phase_conditions(ecosystem: str, enabled: set) -> set:
     """Which conditions the install phase is allowed to see.
 
-    npm's forge access moves entirely into the resolve phase. Everything else
-    keeps the older, weaker arrangement until it has a resolve phase of its own.
+    Where a resolve phase exists, forge access moves entirely into it. Where
+    one does not, the condition keeps its older, weaker meaning rather than
+    being removed and breaking the install.
     """
     if ecosystem in RESOLVE_CAPABLE_ECOSYSTEMS:
         return set(enabled) - RESOLVE_ONLY_CONDITIONS
@@ -191,14 +206,31 @@ DEPENDENCY_SECTIONS = (
 )
 
 
-def parse_git_dependencies(project_dir: Path) -> List[GitDependency]:
-    """Every git dependency declared by the project's manifest and lockfile.
+def parse_git_dependencies(
+    project_dir: Path, ecosystem: str = "npm"
+) -> List[GitDependency]:
+    """Every git dependency the project declares, for one ecosystem.
 
     Reads only. The lockfile matters as much as the manifest: transitive git
     dependencies appear there and nowhere else, and one this misses is one the
     install will try to fetch itself from a forge it cannot reach.
+
+    An ecosystem with no parser returns nothing, which is why
+    RESOLVE_CAPABLE_ECOSYSTEMS must never name one that is missing here.
     """
     project_dir = Path(project_dir)
+    parsers = {
+        "npm": _npm_dependencies,
+        "pypi": _pypi_dependencies,
+        "cargo": _cargo_dependencies,
+    }
+    parser = parsers.get(ecosystem)
+    if parser is None:
+        return []
+    return sorted(parser(project_dir).values(), key=lambda d: d.cache_subpath)
+
+
+def _npm_dependencies(project_dir: Path) -> Dict[str, GitDependency]:
     found: Dict[str, GitDependency] = {}
 
     manifest = project_dir / "package.json"
@@ -223,7 +255,7 @@ def parse_git_dependencies(project_dir: Path) -> List[GitDependency]:
             if dependency:
                 found.setdefault(dependency.cache_subpath, dependency)
 
-    return sorted(found.values(), key=lambda d: d.cache_subpath)
+    return found
 
 
 def _read_json(path: Path) -> dict:
@@ -315,3 +347,195 @@ def link_bare_aliases(cache_dir: Path, dependencies: Sequence[GitDependency]) ->
                 pass
 
 
+
+
+# --- pypi -------------------------------------------------------------------
+#
+# pip shells out to the git CLI, so the same cache and the same insteadOf
+# rewriting work here unchanged. Only the spelling of a dependency differs.
+
+_PIP_GIT_RE = re.compile(
+    r"^git\+(?:https://|ssh://git@)"
+    r"(?P<host>[A-Za-z0-9.-]+)/(?P<path>[A-Za-z0-9._/-]+?)(?:\.git)?"
+    r"(?:@(?P<ref>[^\s#]+))?(?:#(?P<fragment>\S*))?$"
+)
+
+
+def parse_pip_requirement(line: str) -> Optional[GitDependency]:
+    """One requirement line. None if it is not a git dependency.
+
+    pip writes the ref with @ where npm uses #, and carries the package name in
+    an #egg= fragment or a 'name @ url' prefix rather than in a key.
+    """
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    if line.startswith(("-e ", "--editable ")):
+        line = line.split(" ", 1)[1].strip()
+
+    name = ""
+    if " @ " in line:
+        name, _, line = line.partition(" @ ")
+        name, line = name.strip(), line.strip()
+
+    if _UNENCRYPTED_RE.match(line) or line.startswith("git://"):
+        raise UnresolvableDependencyError(
+            f"requirement {line!r} uses the unencrypted git:// protocol. "
+            f"Bulkhead only tunnels TLS. Change it to https://."
+        )
+
+    match = _PIP_GIT_RE.match(line)
+    if not match:
+        return None
+
+    host = match.group("host")
+    if host not in RESOLVABLE_FORGES:
+        raise UnresolvableDependencyError(
+            f"requirement {line!r} points at {host}, which is not a resolvable "
+            f"forge. Add it to allowlists/pypi-resolve.yaml deliberately, or "
+            f"vendor the dependency."
+        )
+
+    fragment = match.group("fragment") or ""
+    if not name and fragment.startswith("egg="):
+        name = fragment[4:].split("&")[0]
+    return GitDependency(
+        name=name or match.group("path").rsplit("/", 1)[-1],
+        host=host, path=match.group("path").rstrip("/"),
+        ref=match.group("ref"), origin=line,
+    )
+
+
+def _pypi_dependencies(project_dir: Path) -> Dict[str, GitDependency]:
+    found: Dict[str, GitDependency] = {}
+
+    for name in ("requirements.txt", "requirements-dev.txt", "constraints.txt"):
+        path = project_dir / name
+        if path.is_file():
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                dependency = parse_pip_requirement(line)
+                if dependency:
+                    found.setdefault(dependency.cache_subpath, dependency)
+
+    pyproject = project_dir / "pyproject.toml"
+    if pyproject.is_file():
+        data = _read_toml(pyproject)
+        project = data.get("project") or {}
+        specs = list(project.get("dependencies") or [])
+        for group in (project.get("optional-dependencies") or {}).values():
+            specs.extend(group or [])
+        for spec in specs:
+            if isinstance(spec, str):
+                dependency = parse_pip_requirement(spec)
+                if dependency:
+                    found.setdefault(dependency.cache_subpath, dependency)
+    return found
+
+
+# --- cargo ------------------------------------------------------------------
+#
+# cargo fetches git dependencies with libgit2, which does not honour
+# url.insteadOf. CARGO_NET_GIT_FETCH_WITH_CLI makes it shell out to git
+# instead, which does. That variable is set by the runner for the install
+# phase; without it the rewriting here would be silently ignored and cargo
+# would try to reach the forge directly.
+
+_CARGO_SOURCE_RE = re.compile(
+    r"^git\+(?:https://|ssh://git@)"
+    r"(?P<host>[A-Za-z0-9.-]+)/(?P<path>[A-Za-z0-9._/-]+?)(?:\.git)?"
+    r"(?:\?(?P<query>[^#]*))?(?:#(?P<rev>\S*))?$"
+)
+
+
+def parse_cargo_source(name: str, source: str) -> Optional[GitDependency]:
+    """A Cargo.lock `source` string, or a [dependencies] git URL."""
+    source = source.strip()
+    if not source:
+        return None
+    if source.startswith("git://") or _UNENCRYPTED_RE.match(source):
+        raise UnresolvableDependencyError(
+            f"dependency {name!r} uses the unencrypted git:// protocol. "
+            f"Bulkhead only tunnels TLS. Change it to https://."
+        )
+    if not source.startswith("git+"):
+        # registry sources look like "registry+https://github.com/rust-lang/
+        # crates.io-index" and are not git dependencies, however much the URL
+        # looks like one.
+        return None
+
+    match = _CARGO_SOURCE_RE.match(source)
+    if not match:
+        return None
+    host = match.group("host")
+    if host not in RESOLVABLE_FORGES:
+        raise UnresolvableDependencyError(
+            f"dependency {name!r} points at {host}, which is not a resolvable "
+            f"forge. Add it to allowlists/cargo-resolve.yaml deliberately, or "
+            f"vendor the dependency."
+        )
+
+    ref = None
+    query = match.group("query") or ""
+    for key in ("tag", "branch", "rev"):
+        marker = f"{key}="
+        if marker in query:
+            ref = query.split(marker, 1)[1].split("&")[0]
+            break
+    return GitDependency(
+        name=name, host=host, path=match.group("path").rstrip("/"),
+        ref=ref or (match.group("rev") or None), origin=source,
+    )
+
+
+def _cargo_dependencies(project_dir: Path) -> Dict[str, GitDependency]:
+    found: Dict[str, GitDependency] = {}
+
+    manifest = project_dir / "Cargo.toml"
+    if manifest.is_file():
+        data = _read_toml(manifest)
+        sections = [data.get("dependencies") or {}, data.get("dev-dependencies") or {},
+                    data.get("build-dependencies") or {}]
+        for target in (data.get("target") or {}).values():
+            if isinstance(target, dict):
+                sections.append(target.get("dependencies") or {})
+        for section in sections:
+            for name, spec in section.items():
+                if not isinstance(spec, dict) or "git" not in spec:
+                    continue
+                url = str(spec["git"])
+                if not url.startswith("git+"):
+                    url = "git+" + url
+                dependency = parse_cargo_source(name, url)
+                if dependency:
+                    ref = spec.get("tag") or spec.get("branch") or spec.get("rev")
+                    if ref:
+                        dependency = GitDependency(
+                            name=dependency.name, host=dependency.host,
+                            path=dependency.path, ref=str(ref),
+                            origin=dependency.origin,
+                        )
+                    found.setdefault(dependency.cache_subpath, dependency)
+
+    lockfile = project_dir / "Cargo.lock"
+    if lockfile.is_file():
+        data = _read_toml(lockfile)
+        for package in data.get("package") or []:
+            if not isinstance(package, dict):
+                continue
+            source = package.get("source")
+            if isinstance(source, str):
+                dependency = parse_cargo_source(package.get("name", "?"), source)
+                if dependency:
+                    found.setdefault(dependency.cache_subpath, dependency)
+    return found
+
+
+def _read_toml(path: Path) -> dict:
+    try:
+        with open(path, "rb") as handle:
+            return tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        raise ResolveError(
+            f"cannot read {path}: {e}. Refusing to run rather than proceed with "
+            f"an unknown set of dependencies."
+        )

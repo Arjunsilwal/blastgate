@@ -14,7 +14,7 @@ wired to any package manager. **Nothing in section 6 constitutes protection of a
 real install today.** See section 7 for the precise gap between design and
 implementation.
 
-Document version: 13. Last reviewed: 2026-08-22.
+Document version: 14. Last reviewed: 2026-08-22.
 
 **Design note, recorded because it departs from the v0 plan.** The plan specified
 environment variables "filtered by shape (prefix, and any name containing TOKEN,
@@ -235,6 +235,9 @@ connectivity would satisfy every isolation assertion while proving nothing.
 | The resolve phase cannot reach the registry | Separate allowlist naming forges only | `TestTwoPhaseResolution::test_the_resolve_policy_cannot_reach_the_registry` |
 | The git cache is read-only during install *(runtime)* | A writable cache would be a channel back into the phase with forge access | `TestTwoPhaseResolution::test_the_git_cache_is_read_only_in_the_install` |
 | Git dependencies without the resolve flag refuse the run *(constrains bulkhead)* | Fail closed rather than reach a forge | `TestTwoPhaseResolution::test_git_dependencies_without_the_flag_are_refused` |
+| The crates.io registry source is not mistaken for a git dependency | Cargo.lock spells it as a GitHub URL | `test_resolve.py::TestCargoSources::test_the_crates_registry_is_not_a_git_dependency` |
+| A pypi or cargo install reaches a forge only during resolution *(runtime)* | Same two-phase split as npm | `test_end_to_end.py::TestResolveAcrossEcosystems::test_cargo_reaches_the_forge_only_in_the_resolve_phase` |
+| Every resolve-capable ecosystem has a parser, an allowlist and an image *(constrains bulkhead)* | Listing one without them removes the grant and breaks installs | `TestEveryCapableEcosystemHasAParser` |
 | A registry tarball URL is not mistaken for a git dependency | https URLs need `git+` or `.git` | `test_resolve.py::TestGitSpecParsing::test_dependencies_come_from_the_lockfile_too` |
 | An unparseable manifest refuses the run *(constrains bulkhead)* | Guessing the dependency set is worse than stopping | `test_resolve.py::TestGitSpecParsing::test_an_unparseable_manifest_refuses_rather_than_guesses` |
 | A shell metacharacter in a manifest cannot escape the clone script | Arguments are shell-quoted independently of the parser's charset | `test_resolve.py::TestCloneScript::test_shell_metacharacters_cannot_escape_the_script` |
@@ -351,22 +354,21 @@ to read it and not find a gap that was left undisclosed.
   payload has no publish token, and the environment filter is why. That is a
   mitigation. `exfil-via-registry-during-install` reproduces it and is counted
   as a failure in the published rate.
-- **Exfiltration to a code forge is closed for npm only, and not by inspecting
-  traffic.** There is still no TLS interception. For npm the forge is simply not
-  in the install phase's allowlist: declared git dependencies are fetched by a
-  separate resolve phase, while no package code is running, and served during
-  the install from a read-only local mirror. There is no read to distinguish
-  from a write because there is no connection. This introduces its own surface,
-  listed in 8.3.
-- **The forge gap is still open for pypi and cargo.** Reading declared git
-  dependencies is manifest-specific, and only npm's manifests are implemented,
-  so those ecosystems have no resolve phase to move forge access into. For them
-  `--allow git-dependencies` keeps its original meaning: the forge is reachable
-  for the whole install, and a payload that reaches it can exfiltrate through
-  it. `bh run` prints a warning saying so whenever that path is taken.
-  Removing the grant instead would not close the gap, it would only break every
-  project with a git dependency — which is exactly what it did, briefly, before
-  the compatibility check against cargo caught it.
+- **Exfiltration to a code forge is closed, and not by inspecting traffic.**
+  There is still no TLS interception. The forge is simply not in the install
+  phase's allowlist for any supported ecosystem: declared git dependencies are
+  fetched by a separate resolve phase, while no package code is running, and
+  served during the install from a read-only local mirror. There is no read to
+  distinguish from a write because there is no connection. This introduces its
+  own surface, listed in 8.3.
+- **An ecosystem without a manifest parser would still be exposed.** Closing the
+  gap requires reading what a project declares, which is manifest-specific. npm,
+  pypi and cargo have parsers; anything added later does not until one is
+  written for it. Such an ecosystem keeps the older, weaker arrangement — the
+  forge reachable for the whole install — and `bh run` warns when that path is
+  taken. Removing the grant without adding a parser does not close the gap, it
+  only breaks every project with a git dependency, which is what it did briefly
+  for pypi and cargo before the compatibility check caught it.
 - **DNS-based exfiltration.** Data encoded in DNS queries is not detected or
   blocked.
 - **Compromised base image or package manager.** If the sandbox interior is
@@ -383,9 +385,15 @@ and they are not nothing.
 
 - **The resolve phase still touches a forge.** It runs `git` against an
   attacker-influenceable repository. No project code executes there, no
-  credentials are present, and its egress is allowlisted and logged under
-  `npm-resolve.yaml` — but git has had its own CVEs and this is a real, if much
-  smaller, exposure.
+  credentials are present, and its egress is allowlisted and logged under the
+  ecosystem's `*-resolve.yaml` — but git has had its own CVEs and this is a
+  real, if much smaller, exposure.
+- **cargo needs the git CLI to be enforced at all.** cargo fetches with libgit2,
+  which ignores `url.insteadOf`. `CARGO_NET_GIT_FETCH_WITH_CLI` makes it shell
+  out to git so the redirection applies. If that variable were ever dropped,
+  cargo would quietly ignore the local mirror and dial the forge — where it
+  would be denied, so the failure is loud rather than silent, but the dependency
+  is worth naming.
 - **Fetched repositories are untrusted data.** The cache holds bytes an attacker
   chose. It is mounted read-only into the install and must never be executed
   from.

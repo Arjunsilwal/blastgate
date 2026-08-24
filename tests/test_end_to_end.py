@@ -348,3 +348,69 @@ class TestTwoPhaseResolution:
         policy = load_policy("npm-resolve")
         assert policy.evaluate("registry.npmjs.org").allowed is False
         assert policy.evaluate("github.com").allowed is True
+
+
+@pytest.fixture(scope="module")
+def cargo_run():
+    from bulkhead.runner import default_anchor_path
+
+    base = Path.home() / ".bulkhead-tests"
+    base.mkdir(parents=True, exist_ok=True)
+    project = Path(tempfile.mkdtemp(dir=base))
+    (project / "src").mkdir()
+    (project / "src" / "main.rs").write_text("fn main() {}\n")
+    (project / "Cargo.toml").write_text(
+        '[package]\nname = "e2e"\nversion = "0.1.0"\nedition = "2021"\n\n'
+        '[dependencies]\n'
+        'anyhow = { git = "https://github.com/dtolnay/anyhow", tag = "1.0.93" }\n'
+    )
+    audit = default_audit_path(project)
+    anchors = default_anchor_path(project)
+    for artefact in (audit, anchors):
+        if artefact.exists():
+            artefact.unlink()
+    result = run_install(
+        policy=load_policy("cargo"), command=["cargo", "fetch"],
+        project_dir=project, audit_path=audit,
+        enabled_conditions={"git-dependencies"}, host_env={}, timeout=900,
+    )
+    yield project, audit, result
+    shutil.rmtree(project, ignore_errors=True)
+    for artefact in (audit, anchors):
+        if artefact.exists():
+            artefact.unlink()
+
+
+@pytest.mark.skipif(RUNTIME is None, reason="no container runtime available")
+class TestResolveAcrossEcosystems:
+    """The forge gap is closed for pypi and cargo the same way as for npm.
+
+    cargo is the one that needed more than a parser: it fetches with libgit2,
+    which ignores url.insteadOf, so without CARGO_NET_GIT_FETCH_WITH_CLI the
+    rewrite is silently skipped and cargo dials the forge directly.
+    """
+
+    def test_a_cargo_git_dependency_resolves(self, cargo_run):
+        _, _, result = cargo_run
+        assert result.exit_code == 0, result.stderr[-1000:]
+
+    def test_cargo_reaches_the_forge_only_in_the_resolve_phase(self, cargo_run):
+        _, audit, _ = cargo_run
+        entries = AuditLog(audit).read_all()
+        resolve = [e for e in entries if e.ecosystem == "cargo-resolve"]
+        install = [e for e in entries if e.ecosystem == "cargo"]
+
+        assert any(e.host == "github.com" and e.allowed for e in resolve), (
+            "the resolve phase never fetched, so the test below proves nothing"
+        )
+        forge_allows = [
+            e for e in install
+            if e.allowed and ("github" in e.host or "gitlab" in e.host)
+        ]
+        assert not forge_allows, [(e.host, e.rule) for e in forge_allows]
+
+    def test_the_cargo_resolve_policy_denies_the_crate_registry(self):
+        assert load_policy("cargo-resolve").evaluate("crates.io").allowed is False
+
+    def test_the_pypi_resolve_policy_denies_the_package_index(self):
+        assert load_policy("pypi-resolve").evaluate("pypi.org").allowed is False

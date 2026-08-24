@@ -54,6 +54,7 @@ from bulkhead.resolve import (
     GITCONFIG_NAME,
     RESOLVE_ONLY_CONDITIONS,
     install_phase_conditions,
+    resolve_policy_for,
     GitDependency,
     UnresolvableDependencyError,
     clone_script,
@@ -443,7 +444,7 @@ DEFAULT_IMAGES = {
 }
 
 
-NPM_GIT_IMAGE_REPO = "bulkhead-npm-git"
+GIT_IMAGE_REPO_PREFIX = "bulkhead"
 
 
 def default_image_for(ecosystem: str) -> str:
@@ -455,24 +456,30 @@ def default_image_for(ecosystem: str) -> str:
         )
 
 
-def install_image_tag(context: Optional[Path] = None) -> str:
+def install_dockerfile_for(ecosystem: str, context: Optional[Path] = None) -> Path:
     context = Path(context) if context else _repo_root()
-    dockerfile = context / "docker" / "npm-git.Dockerfile"
+    return context / "docker" / f"{ecosystem}-git.Dockerfile"
+
+
+def install_image_tag(ecosystem: str = "npm", context: Optional[Path] = None) -> str:
+    dockerfile = install_dockerfile_for(ecosystem, context)
     digest = hashlib.sha256(dockerfile.read_bytes()).hexdigest()[:12]
-    return f"{NPM_GIT_IMAGE_REPO}:{digest}"
+    return f"{GIT_IMAGE_REPO_PREFIX}-{ecosystem}-git:{digest}"
 
 
-def ensure_install_image(runtime: str, context: Optional[Path] = None) -> str:
-    """Build the git-capable npm image if it is not already built.
+def ensure_install_image(
+    runtime: str, ecosystem: str = "npm", context: Optional[Path] = None
+) -> str:
+    """Build the git-capable image for an ecosystem if it is not already built.
 
     Only used when a project declares git dependencies. A project without them
     installs in the plain image and never gets a git binary it has no use for.
     """
     context = Path(context) if context else _repo_root()
-    dockerfile = context / "docker" / "npm-git.Dockerfile"
+    dockerfile = install_dockerfile_for(ecosystem, context)
     if not dockerfile.is_file():
         raise RunnerError(f"install Dockerfile not found at {dockerfile}")
-    image = install_image_tag(context)
+    image = install_image_tag(ecosystem, context)
     if _run([runtime, "image", "inspect", image]).returncode == 0:
         return image
     result = _run(
@@ -813,7 +820,7 @@ def run_install(
 
     # Resolve phase. Anything declared is fetched now, while no project code is
     # running, and served locally during the install.
-    dependencies = parse_git_dependencies(project_dir)
+    dependencies = parse_git_dependencies(project_dir, policy.ecosystem)
     cache_dir = Path(git_cache_dir or GIT_CACHE_DIR).resolve()
     if dependencies:
         if not (enabled_conditions & RESOLVE_ONLY_CONDITIONS):
@@ -825,15 +832,16 @@ def run_install(
                 f"install starts rather than opening a forge to it."
             )
         resolve_git_dependencies(
-            dependencies, audit_path=audit_path, runtime=runtime,
-            cache_dir=cache_dir, timeout=timeout,
+            dependencies, audit_path=audit_path, ecosystem=policy.ecosystem,
+            runtime=runtime, cache_dir=cache_dir, timeout=timeout,
         )
 
     if explicit_image:
         pass
-    elif dependencies and policy.ecosystem == "npm":
-        # npm shells out to git even for an already-local repository.
-        image = ensure_install_image(runtime)
+    elif dependencies:
+        # Every one of these package managers shells out to git even when the
+        # repository is already local, and none of the base images ships it.
+        image = ensure_install_image(runtime, policy.ecosystem)
     else:
         image = default_image_for(policy.ecosystem)
 
@@ -862,6 +870,10 @@ def run_install(
         extra_mounts.append((cache_dir, CACHE_MOUNT, True))
         env["GIT_CONFIG_GLOBAL"] = f"{CACHE_MOUNT}/{GITCONFIG_NAME}"
         env["GIT_TERMINAL_PROMPT"] = "0"
+        # cargo fetches with libgit2 by default, which ignores url.insteadOf.
+        # Without this the rewrite is silently skipped and cargo dials the
+        # forge it is not allowed to reach.
+        env["CARGO_NET_GIT_FETCH_WITH_CLI"] = "true"
 
     run_id = uuid.uuid4().hex
 
@@ -893,6 +905,7 @@ def run_install(
 def resolve_git_dependencies(
     dependencies: Sequence[GitDependency],
     audit_path: Path,
+    ecosystem: str = "npm",
     runtime: Optional[str] = None,
     cache_dir: Path = GIT_CACHE_DIR,
     image: str = GIT_IMAGE,
@@ -915,7 +928,7 @@ def resolve_git_dependencies(
     ensure_networks(runtime)
     image_tag = ensure_proxy_image(runtime)
 
-    policy = load_policy("npm-resolve")
+    policy = load_policy(resolve_policy_for(ecosystem))
     env = dict(PROXY_ENV)
     # Nothing to authenticate with. Any credential prompt is a hang, not a
     # login, so fail instead of waiting.
