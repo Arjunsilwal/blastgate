@@ -40,6 +40,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
@@ -52,6 +53,7 @@ from bulkhead.resolve import (
     GIT_IMAGE,
     GITCONFIG_NAME,
     RESOLVE_ONLY_CONDITIONS,
+    install_phase_conditions,
     GitDependency,
     UnresolvableDependencyError,
     clone_script,
@@ -835,10 +837,17 @@ def run_install(
     else:
         image = default_image_for(policy.ecosystem)
 
-    # The forge is not reachable from the install, whatever the user enabled.
-    # git-dependencies permits the resolve phase; it does not open a host to
-    # code that is about to execute.
-    install_conditions = enabled_conditions - RESOLVE_ONLY_CONDITIONS
+    # For npm the forge is not reachable from the install, whatever the user
+    # enabled: git-dependencies permits the resolve phase and grants the install
+    # nothing. Other ecosystems have no resolve phase yet, so the condition
+    # keeps its older meaning there and the forge gap stays open for them.
+    install_conditions = install_phase_conditions(policy.ecosystem, enabled_conditions)
+    if install_conditions & RESOLVE_ONLY_CONDITIONS:
+        sys.stderr.write(
+            f"bh: warning: {policy.ecosystem} has no resolve phase, so code "
+            f"forges stay reachable for the whole install. A payload that "
+            f"reaches one can exfiltrate through it. See threat-model 8.1.\n"
+        )
 
     ensure_networks(runtime)
     image_tag = ensure_proxy_image(runtime)

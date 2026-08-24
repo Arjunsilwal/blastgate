@@ -14,7 +14,7 @@ wired to any package manager. **Nothing in section 6 constitutes protection of a
 real install today.** See section 7 for the precise gap between design and
 implementation.
 
-Document version: 12. Last reviewed: 2026-08-22.
+Document version: 13. Last reviewed: 2026-08-22.
 
 **Design note, recorded because it departs from the v0 plan.** The plan specified
 environment variables "filtered by shape (prefix, and any name containing TOKEN,
@@ -351,12 +351,22 @@ to read it and not find a gap that was left undisclosed.
   payload has no publish token, and the environment filter is why. That is a
   mitigation. `exfil-via-registry-during-install` reproduces it and is counted
   as a failure in the published rate.
-- **Exfiltration to a code forge is closed, and not by inspecting traffic.**
-  There is still no TLS interception. The forge is simply not in the install
-  phase's allowlist: declared git dependencies are fetched by a separate resolve
-  phase, while no package code is running, and served during the install from a
-  read-only local mirror. There is no read to distinguish from a write because
-  there is no connection. This introduces its own surface, listed in 8.3.
+- **Exfiltration to a code forge is closed for npm only, and not by inspecting
+  traffic.** There is still no TLS interception. For npm the forge is simply not
+  in the install phase's allowlist: declared git dependencies are fetched by a
+  separate resolve phase, while no package code is running, and served during
+  the install from a read-only local mirror. There is no read to distinguish
+  from a write because there is no connection. This introduces its own surface,
+  listed in 8.3.
+- **The forge gap is still open for pypi and cargo.** Reading declared git
+  dependencies is manifest-specific, and only npm's manifests are implemented,
+  so those ecosystems have no resolve phase to move forge access into. For them
+  `--allow git-dependencies` keeps its original meaning: the forge is reachable
+  for the whole install, and a payload that reaches it can exfiltrate through
+  it. `bh run` prints a warning saying so whenever that path is taken.
+  Removing the grant instead would not close the gap, it would only break every
+  project with a git dependency — which is exactly what it did, briefly, before
+  the compatibility check against cargo caught it.
 - **DNS-based exfiltration.** Data encoded in DNS queries is not detected or
   blocked.
 - **Compromised base image or package manager.** If the sandbox interior is
@@ -417,12 +427,12 @@ and they are not nothing.
 - **The proxy will see hostnames, not content.** Without TLS interception the
   enforcement point knows the destination and nothing else. Volume, timing, and
   payload are invisible.
-- **The false-positive budget is verified against eight npm projects and
-  nothing else.** `scripts/compat_check.py` installs each one twice, with and
-  without bulkhead, and currently finds no false positives. Eight is a small
-  sample, all of it npm; pypi and cargo have allowlists and no compatibility
-  evidence at all. Read the result as "none found in eight projects", not as a
-  rate.
+- **The false-positive budget is verified against a small sample.**
+  `scripts/compat_check.py` installs each project twice, with and without
+  bulkhead, across npm, pypi and cargo, and currently finds no false positives.
+  Read that as "none found", not as a rate. Both runs are retried the same
+  number of times, because an unretried control silently excludes a project on a
+  transient failure and makes the number look better by measuring less.
 - **Compatibility currently depends on an ecosystem convention that could
   change.** The two hardest cases in that check, esbuild and sharp, were chosen
   because they historically downloaded binaries from GitHub releases during

@@ -62,39 +62,47 @@ hide real breakage in noise.
 python scripts/compat_check.py
 ```
 
-**8 of 8 projects install unchanged under bulkhead. False positive rate: 0%.**
+**15 of 15 projects install unchanged under bulkhead. No false positives found.**
 
-| Project | Pinned at | Verdict | Denied hosts |
+| Project | Ecosystem | Why it is here | Verdict |
 | --- | --- | --- | --- |
-| `express` | `v5.2.1` | compatible | — |
-| `axios` | `v1.19.0` | compatible | — |
-| `got` | `v15.1.0` | compatible | — |
-| `prettier` | `3.9.6` | compatible | — |
-| `date-fns` | `v4.4.0` | excluded | — |
-| esbuild `0.24.0` | postinstall binary | compatible | — |
-| sharp `0.33.5` | native module | compatible | — |
-| `is-odd#3.0.1` | git dependency | compatible | `codeload.github.com` |
-| webpack + eslint | deep transitive graph | compatible | — |
+| `express` `axios` `got` `prettier` | npm | real repos, pinned to release tags | compatible |
+| `esbuild` | npm | postinstall downloads a platform binary | compatible |
+| `sharp` | npm | native module, prebuilt binaries | compatible |
+| `is-odd#3.0.1` | npm | git dependency via the resolve phase | compatible |
+| webpack + eslint | npm | wide, deep transitive graph | compatible |
+| `requests` `click` | pypi | pure-python wheels | compatible |
+| `cryptography` | pypi | compiled wheel | compatible |
+| `pendulum` | pypi | build isolation fetches its own backend | compatible |
+| `fastapi` `uvicorn` | pypi | wide transitive graph | compatible |
+| `serde` | cargo | sparse index plus crate downloads | compatible |
+| `tokio` `clap` | cargo | hundreds of transitive crates | compatible |
+| `anyhow` (git) | cargo | git dependency, no resolve phase | compatible |
+| `date-fns` | npm | — | **excluded** |
 
-`date-fns` is excluded because its *control* install also fails: `oxlint@^1.65.0`
-floats forward to a release whose peer requirement its pinned sibling cannot
-satisfy, so the tag does not install today under any sandbox. That is upstream's
-conflict, not bulkhead's, and counting it either way would be dishonest.
+`date-fns` is excluded because its *control* install fails too: `oxlint@^1.65.0`
+floats forward into a peer conflict with its own pinned sibling, so the tag does
+not install today under any sandbox. That is upstream's conflict, not
+bulkhead's. The report prints the `ERESOLVE` output so the exclusion can be
+checked rather than taken on trust.
+
+Both runs are retried the same number of times. An unretried control silently
+excludes a project on a transient failure, which makes the rate look better by
+measuring less — `got` did exactly that on one run and installed fine on the
+next two. Deterministic failures skip the retries.
 
 ### Why this number is weaker than it looks
 
-Read it as "no false positives found in eight projects", not as a rate.
+Read it as "no false positives found in fifteen projects", not as a rate.
 
-- **Eight projects is a small sample, and all of them are npm.** pypi and cargo
-  have allowlists and no compatibility evidence at all.
-- **The two hardest cases passed for reasons that have nothing to do with this
-  design.** esbuild and sharp were included because they historically downloaded
-  binaries from GitHub releases at postinstall, which bulkhead would deny. Both
-  now ship platform binaries as npm optional dependencies served from the
-  registry. The ecosystem moved somewhere convenient; that is luck, and it can
-  move back.
-- **Only one case exercises git dependencies**, and none has a lockfile
-  containing one, which is where transitive git dependencies actually appear.
+- **The two hardest npm cases passed for reasons unrelated to this design.**
+  esbuild and sharp were included because they historically downloaded binaries
+  from GitHub releases at postinstall, which bulkhead denies. Both now ship
+  platform binaries as npm optional dependencies served from the registry. The
+  ecosystem moved somewhere convenient; that is luck, and it can move back.
+- **The pypi and cargo cases are synthetic manifests**, not cloned projects.
+  They exercise real packages and real transitive graphs, but not real
+  repository layouts.
 - **Untested entirely:** private registries, authenticated `.npmrc`, workspace
   monorepos, yarn, and pnpm.
 
@@ -159,7 +167,7 @@ tests are built around:
 tests/test_end_to_end.py::TestTheWholeThing::test_a_payload_that_ignores_the_proxy_is_still_blocked
 ```
 
-### Git dependencies never open a forge
+### Git dependencies never open a forge (npm)
 
 A dependency like `"is-odd": "github:jonschlinkert/is-odd"` used to require
 putting `github.com` in the allowlist for the whole install — and a proxy that
@@ -188,9 +196,16 @@ npm          DENY   codeload.github.com   ← the install tried; it was refused
 The install succeeds anyway, from the mirror. There is no read to distinguish
 from a write because there is no connection.
 
-This is a narrowing, not a solution. The registry has to stay reachable during
-an install, and a registry accepts writes — that residual is the corpus scenario
-`exfil-via-registry-during-install`, counted as a failure below.
+This is a narrowing, not a solution, in two ways. The registry has to stay
+reachable during an install, and a registry accepts writes — that residual is
+the corpus scenario `exfil-via-registry-during-install`, counted as a failure
+below.
+
+And it is **npm only**. Reading declared git dependencies is manifest-specific,
+so pypi and cargo have no resolve phase and `--allow git-dependencies` keeps its
+original meaning there: the forge stays reachable for the whole install. `bh run`
+warns when that happens. Removing the grant instead would not close the gap for
+them, it would only break every project with a git dependency.
 
 The audit log is written to a directory mounted into the proxy container and
 nowhere else, so the sandbox cannot read or delete it. Pointing `--audit` inside

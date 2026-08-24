@@ -48,16 +48,40 @@ from bulkhead.runner import (  # noqa: E402
 )
 
 NPM_IMAGE = "node:20-alpine"
-INSTALL_CMD = ["npm", "install", "--no-audit", "--no-fund"]
+
+# One entry per ecosystem: the image bulkhead would pick, and the command that
+# means "fetch this project's dependencies". For cargo that is `fetch` rather
+# than `build`: compiling is not what egress policy governs, and building would
+# measure the compiler instead.
+ECOSYSTEMS = {
+    "npm": {
+        "image": "node:20-alpine",
+        "command": ["npm", "install", "--no-audit", "--no-fund"],
+        "manifest_name": "package.json",
+    },
+    "pypi": {
+        "image": "python:3.12-alpine",
+        "command": ["pip", "install", "--no-cache-dir", "--root-user-action=ignore",
+                    "-r", "requirements.txt"],
+        "manifest_name": "requirements.txt",
+    },
+    "cargo": {
+        "image": "rust:1-alpine",
+        "command": ["cargo", "fetch"],
+        "manifest_name": "Cargo.toml",
+    },
+}
 
 
 @dataclass
 class Case:
     name: str
     kind: str                      # "repo" or "manifest"
+    ecosystem: str = "npm"
     repo: Optional[str] = None
     ref: Optional[str] = None      # release tag, never a moving branch
-    manifest: Optional[dict] = None
+    manifest: Optional[dict] = None   # npm: package.json fields
+    files: Optional[Dict[str, str]] = None  # any ecosystem: literal files
     why: str = ""
 
 
@@ -92,6 +116,42 @@ CASES: List[Case] = [
     Case("deep-tree", "manifest",
          manifest={"dependencies": {"webpack": "5.95.0", "eslint": "9.13.0"}},
          why="wide and deep transitive graph"),
+
+    # pypi
+    Case("pypi-pure", "manifest", ecosystem="pypi",
+         files={"requirements.txt": "requests==2.32.3\nclick==8.1.7\n"},
+         why="pure-python wheels from the index"),
+    Case("pypi-binary-wheels", "manifest", ecosystem="pypi",
+         files={"requirements.txt": "cryptography==43.0.3\n"},
+         why="compiled wheel, large binary artefact"),
+    Case("pypi-build-isolation", "manifest", ecosystem="pypi",
+         files={"requirements.txt": "pendulum==3.0.0\n"},
+         why="build isolation fetches its own build backend"),
+    Case("pypi-deep-tree", "manifest", ecosystem="pypi",
+         files={"requirements.txt": "fastapi==0.115.4\nuvicorn==0.32.0\n"},
+         why="wide transitive graph"),
+
+    # cargo
+    Case("cargo-simple", "manifest", ecosystem="cargo",
+         files={"Cargo.toml": '[package]\nname = "compat"\nversion = "0.1.0"\n'
+                              'edition = "2021"\n\n[dependencies]\n'
+                              'serde = "1.0"\nserde_json = "1.0"\n',
+                "src/main.rs": "fn main() {}\n"},
+         why="sparse index plus crate downloads"),
+    Case("cargo-deep-tree", "manifest", ecosystem="cargo",
+         files={"Cargo.toml": '[package]\nname = "compat"\nversion = "0.1.0"\n'
+                              'edition = "2021"\n\n[dependencies]\n'
+                              'tokio = { version = "1", features = ["full"] }\n'
+                              'clap = { version = "4", features = ["derive"] }\n',
+                "src/main.rs": "fn main() {}\n"},
+         why="hundreds of transitive crates"),
+    Case("cargo-git-dependency", "manifest", ecosystem="cargo",
+         files={"Cargo.toml": '[package]\nname = "compat"\nversion = "0.1.0"\n'
+                              'edition = "2021"\n\n[dependencies]\n'
+                              'anyhow = { git = "https://github.com/dtolnay/anyhow", '
+                              'tag = "1.0.93" }\n',
+                "src/main.rs": "fn main() {}\n"},
+         why="git dependency in an ecosystem with no resolve phase"),
 ]
 
 
@@ -100,8 +160,10 @@ class Result:
     case: Case
     control_ok: bool = False
     control_detail: str = ""
+    control_attempts: int = 1
     bulkhead_ok: bool = False
     bulkhead_detail: str = ""
+    bulkhead_attempts: int = 1
     denied_hosts: List[str] = field(default_factory=list)
     commit: str = ""
     seconds: float = 0.0
@@ -122,9 +184,15 @@ def prepare(case: Case, workdir: Path) -> tuple:
     source = workdir / "source"
     source.mkdir(parents=True)
     if case.kind == "manifest":
-        manifest = {"name": f"compat-{case.name}", "version": "1.0.0"}
-        manifest.update(case.manifest or {})
-        (source / "package.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        if case.files:
+            for name, content in case.files.items():
+                target = source / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content)
+        else:
+            manifest = {"name": f"compat-{case.name}", "version": "1.0.0"}
+            manifest.update(case.manifest or {})
+            (source / "package.json").write_text(json.dumps(manifest, indent=2) + "\n")
         return source, "pinned in manifest"
 
     if not case.ref:
@@ -142,7 +210,7 @@ def prepare(case: Case, workdir: Path) -> tuple:
     return source, commit
 
 
-def image_for(project: Path, runtime: str) -> str:
+def image_for(project: Path, runtime: str, ecosystem: str = "npm") -> str:
     """The image bulkhead would choose, used for the control too.
 
     The control has to differ from the test in exactly one variable: whether
@@ -151,45 +219,111 @@ def image_for(project: Path, runtime: str) -> str:
     its control for a reason that had nothing to do with network policy and
     got excluded from the measurement it existed to provide.
     """
-    if parse_git_dependencies(project):
+    if ecosystem == "npm" and parse_git_dependencies(project):
         return ensure_install_image(runtime)
-    return NPM_IMAGE
+    return ECOSYSTEMS[ecosystem]["image"]
 
 
-def control_install(project: Path, runtime: str, image: str, timeout: int = 900):
-    """The same container with full network. What "working" looks like."""
+ATTEMPTS = 3
+
+# Failures that cannot change between attempts. Matched against the complete
+# output rather than the tail that gets reported.
+DETERMINISTIC = ("ERESOLVE", "Conflicting peer dependency", "no matching version")
+
+
+def is_deterministic(output: str) -> bool:
+    return any(marker in output for marker in DETERMINISTIC)
+
+
+NOISE = ("npm notice", "A complete log", "For a full report", "npm warn",
+         "To update run", "Changelog:", "npm error A complete")
+
+
+def summarise(output: str, limit: int = 240) -> str:
+    """The lines that say why it failed, not the last few lines printed.
+
+    An exclusion is only trustworthy if a reader can check it. Reporting the
+    tail of npm's output gave "To update run: npm install -g npm@12.0.2" as the
+    reason date-fns was excluded, which tells nobody anything.
+    """
+    interesting = [
+        line.strip() for line in output.splitlines()
+        if line.strip()
+        and any(marker in line for marker in ("error", "Error", "ERROR", "fatal"))
+        and not any(marker in line for marker in NOISE)
+    ]
+    if not interesting:
+        interesting = [line.strip() for line in output.splitlines() if line.strip()]
+    text = " | ".join(dict.fromkeys(interesting))
+    return text[:limit]
+
+
+def control_install(project: Path, runtime: str, image: str, command: List[str],
+                    timeout: int = 900):
+    """The same container with full network. What "working" looks like.
+
+    Retried, because a control that flakes is worse than one that fails. A
+    transient registry hiccup would otherwise exclude the project, silently
+    shrinking the denominator and making the false positive rate look better by
+    testing fewer things. Observed: `got` excluded itself on one run and
+    installed fine on the next two.
+
+    The bulkhead run is retried the same number of times, so neither side gets
+    an advantage, and the attempt count is reported either way.
+    """
     argv = [
         runtime, "run", "--rm", "--network", "bridge",
         "--mount", f"type=bind,source={project},target=/workspace",
-        "-w", "/workspace", "--entrypoint", "npm",
-        image, *INSTALL_CMD[1:],
+        "-w", "/workspace", "--entrypoint", command[0],
+        image, *command[1:],
     ]
-    result = _run(argv, timeout)
-    return result.returncode == 0, (result.stderr or result.stdout).strip()[-300:]
+    detail = ""
+    for attempt in range(1, ATTEMPTS + 1):
+        result = _run(argv, timeout)
+        if result.returncode == 0:
+            return True, "", attempt
+        full = (result.stderr or "") + (result.stdout or "")
+        detail = summarise(full)
+        # A dependency conflict is deterministic; retrying only wastes minutes.
+        # Checked against the whole output, not the truncated tail: npm prints
+        # the conflict well before the end, so matching on the tail never fired
+        # and date-fns was retried three times for a failure that could not
+        # change.
+        if is_deterministic(full):
+            return False, detail, attempt
+    return False, detail, ATTEMPTS
 
 
-def bulkhead_install(project: Path, timeout: int = 900):
+def bulkhead_install(project: Path, ecosystem: str = "npm", timeout: int = 900):
     audit = default_audit_path(project)
     anchors = default_anchor_path(project)
     for artefact in (audit, anchors):
         if artefact.exists():
             artefact.unlink()
 
-    conditions = set()
-    if parse_git_dependencies(project):
-        conditions.add("git-dependencies")
+    # Ask for whatever the project needs. For npm that starts the resolve
+    # phase; for the others it is the old conditional grant.
+    conditions = {"git-dependencies"}
 
     denied: List[str] = []
-    try:
-        result = run_install(
-            policy=load_policy("npm"), command=INSTALL_CMD, project_dir=project,
-            audit_path=audit, enabled_conditions=conditions, host_env={},
-            timeout=timeout,
-        )
-        ok = result.exit_code == 0
-        detail = (result.stderr or result.stdout).strip()[-300:]
-    except Exception as e:
-        ok, detail = False, f"{type(e).__name__}: {e}"[-300:]
+    ok, detail, attempts = False, "", ATTEMPTS
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            result = run_install(
+                policy=load_policy(ecosystem),
+                command=ECOSYSTEMS[ecosystem]["command"], project_dir=project,
+                audit_path=audit, enabled_conditions=conditions, host_env={},
+                timeout=timeout,
+            )
+            ok = result.exit_code == 0
+            full = (result.stderr or "") + (result.stdout or "")
+            detail = "" if ok else summarise(full)
+        except Exception as e:
+            ok, full = False, f"{type(e).__name__}: {e}"
+            detail = summarise(full)
+        if ok or is_deterministic(full):
+            attempts = attempt
+            break
 
     if audit.exists():
         seen = []
@@ -197,7 +331,7 @@ def bulkhead_install(project: Path, timeout: int = 900):
             if not entry.allowed and entry.host not in seen:
                 seen.append(entry.host)
         denied = seen
-    return ok, detail, denied
+    return ok, detail, denied, attempts
 
 
 def run_case(case: Case, runtime: str) -> Result:
@@ -213,15 +347,19 @@ def run_case(case: Case, runtime: str) -> Result:
 
         control_dir = workdir / "control"
         shutil.copytree(source, control_dir)
-        image = image_for(control_dir, runtime)
-        result.control_ok, result.control_detail = control_install(control_dir, runtime, image)
+        image = image_for(control_dir, runtime, case.ecosystem)
+        (result.control_ok, result.control_detail,
+         result.control_attempts) = control_install(
+            control_dir, runtime, image, ECOSYSTEMS[case.ecosystem]["command"]
+        )
         shutil.rmtree(control_dir, ignore_errors=True)
         if not result.control_ok:
             return result
 
         test_dir = workdir / "bulkhead"
         shutil.copytree(source, test_dir)
-        result.bulkhead_ok, result.bulkhead_detail, result.denied_hosts = bulkhead_install(test_dir)
+        (result.bulkhead_ok, result.bulkhead_detail, result.denied_hosts,
+         result.bulkhead_attempts) = bulkhead_install(test_dir, case.ecosystem)
         return result
     finally:
         result.seconds = time.time() - started
@@ -238,24 +376,28 @@ def render(results: List[Result]) -> str:
         f"**{len(considered) - len(failures)} of {len(considered)} real projects "
         f"install unchanged under bulkhead. False positive rate: {rate:.0f}%.**",
         "",
-        "| Project | Pinned at | Why it is here | Verdict | Denied hosts |",
+        "| Project | Ecosystem | Why it is here | Verdict | Denied hosts |",
         "| --- | --- | --- | --- | --- |",
     ]
     for r in results:
         hosts = ", ".join(f"`{h}`" for h in r.denied_hosts[:4]) or "—"
-        pin = f"`{r.case.ref}`" if r.case.ref else "version-pinned"
+        retried = ""
+        if max(r.control_attempts, r.bulkhead_attempts) > 1:
+            retried = (f" (retried: control {r.control_attempts}x, "
+                       f"bulkhead {r.bulkhead_attempts}x)")
         lines.append(
-            f"| `{r.case.name}` | {pin} | {r.case.why} | {r.verdict} | {hosts} |"
+            f"| `{r.case.name}` | {r.case.ecosystem} | {r.case.why} | "
+            f"{r.verdict}{retried} | {hosts} |"
         )
     if excluded:
         lines += ["", "Excluded because the control install also failed, so the"
                   " failure is not bulkhead's:"]
         for r in excluded:
-            lines.append(f"- `{r.case.name}`: {r.control_detail[-160:]}")
+            lines.append(f"- `{r.case.name}`: {r.control_detail}")
     if failures:
         lines += ["", "False positives, in full:"]
         for r in failures:
-            lines.append(f"- `{r.case.name}`: {r.bulkhead_detail[-300:]}")
+            lines.append(f"- `{r.case.name}`: {r.bulkhead_detail}")
     return "\n".join(lines)
 
 

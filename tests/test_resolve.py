@@ -164,3 +164,48 @@ class TestCloneScript:
         from bulkhead.resolve import clone_script
 
         assert clone_script([]).strip() == "set -e\necho RESOLVE_OK"
+
+
+class TestInstallPhaseConditions:
+    """Which conditions survive into the install phase, per ecosystem.
+
+    This exists because stripping git-dependencies everywhere was a regression.
+    npm gained a resolve phase to replace the grant; pypi and cargo did not, so
+    for them the flag silently granted nothing and every project with a git
+    dependency failed. It was caught by running the compatibility check against
+    cargo, not by any test, which is why there is one now.
+    """
+
+    def test_npm_moves_forge_access_into_the_resolve_phase(self):
+        from bulkhead.resolve import install_phase_conditions
+
+        assert install_phase_conditions("npm", {"git-dependencies"}) == set()
+
+    @pytest.mark.parametrize("ecosystem", ["pypi", "cargo"])
+    def test_ecosystems_without_a_resolve_phase_keep_the_old_grant(self, ecosystem):
+        # Weaker, and deliberately so: removing the grant without providing the
+        # phase that replaces it breaks the install instead of protecting it.
+        from bulkhead.resolve import install_phase_conditions
+
+        assert install_phase_conditions(ecosystem, {"git-dependencies"}) == {"git-dependencies"}
+
+    def test_unrelated_conditions_are_never_stripped(self):
+        from bulkhead.resolve import install_phase_conditions
+
+        assert install_phase_conditions("npm", {"something-else"}) == {"something-else"}
+
+    def test_nothing_enabled_stays_nothing(self):
+        from bulkhead.resolve import install_phase_conditions
+
+        for ecosystem in ("npm", "pypi", "cargo"):
+            assert install_phase_conditions(ecosystem, set()) == set()
+
+    def test_every_resolve_capable_ecosystem_can_actually_parse_manifests(self, tmp_path):
+        # A name added to RESOLVE_CAPABLE_ECOSYSTEMS without a parser to match
+        # would reintroduce the exact regression this class exists for.
+        from bulkhead.resolve import RESOLVE_CAPABLE_ECOSYSTEMS
+
+        assert RESOLVE_CAPABLE_ECOSYSTEMS == {"npm"}, (
+            "adding an ecosystem here requires parse_git_dependencies to read "
+            "its manifests, or --allow git-dependencies grants nothing there"
+        )

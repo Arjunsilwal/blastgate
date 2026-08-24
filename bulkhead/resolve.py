@@ -53,6 +53,30 @@ FORGE_PREFIXES = {
 # resolve phase to run instead.
 RESOLVE_ONLY_CONDITIONS = frozenset({"git-dependencies"})
 
+# ...but only where a resolve phase exists to do the fetching. Reading git
+# dependencies is manifest-specific and only npm's manifests are implemented.
+#
+# Stripping the condition everywhere was a regression: for pypi and cargo it
+# removed the grant without providing the phase that replaces it, so
+# --allow git-dependencies silently granted nothing and any project with a git
+# dependency failed. Caught by running the compatibility check against cargo.
+#
+# For those ecosystems the condition keeps its old meaning, which means the
+# forge exfiltration gap is still open there. That is a disclosed difference,
+# not a quiet one: see docs/threat-model.md section 8.1.
+RESOLVE_CAPABLE_ECOSYSTEMS = frozenset({"npm"})
+
+
+def install_phase_conditions(ecosystem: str, enabled: set) -> set:
+    """Which conditions the install phase is allowed to see.
+
+    npm's forge access moves entirely into the resolve phase. Everything else
+    keeps the older, weaker arrangement until it has a resolve phase of its own.
+    """
+    if ecosystem in RESOLVE_CAPABLE_ECOSYSTEMS:
+        return set(enabled) - RESOLVE_ONLY_CONDITIONS
+    return set(enabled)
+
 _GIT_HTTPS_RE = re.compile(
     r"^(?:git\+)?https://(?P<host>[A-Za-z0-9.-]+)/(?P<path>[A-Za-z0-9._/-]+?)"
     r"(?:\.git)?(?:#(?P<ref>[^\s#]+))?$"
