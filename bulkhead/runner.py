@@ -32,6 +32,8 @@ import time
 import uuid
 from typing import Dict, Iterable, Mapping, Optional, Sequence, Set, Tuple
 
+from bulkhead.audit import AnchorStore, AuditLog
+
 
 class RunnerError(Exception):
     """Base error for sandbox construction failures."""
@@ -431,6 +433,59 @@ def assert_audit_log_unreachable(audit_path: Path, project_dir: Path) -> None:
     )
 
 
+def default_anchor_path(project_dir: Path) -> Path:
+    """A per-project anchor store, in its own directory.
+
+    Deliberately not beside the audit log. The audit log's directory is bind
+    mounted into the proxy container, so anything in it is reachable by the
+    process that writes the log. The anchor has to be somewhere that process
+    cannot see, or it anchors nothing.
+    """
+    project_dir = Path(project_dir).resolve()
+    digest = hashlib.sha256(str(project_dir).encode("utf-8")).hexdigest()[:12]
+    return Path.home() / ".bulkhead" / "anchors" / f"{project_dir.name}-{digest}.anchors"
+
+
+def anchor_path_for_audit(audit_path: Path) -> Path:
+    """The anchor store that corresponds to an audit log by convention.
+
+    Both defaults are keyed by the same project digest, so the log's filename
+    determines its anchor's filename. Used by `bh audit` to find an anchor
+    without being told where it is.
+    """
+    return Path.home() / ".bulkhead" / "anchors" / (Path(audit_path).stem + ".anchors")
+
+
+def assert_anchor_store_unreachable(
+    anchor_path: Path, audit_path: Path, project_dir: Path
+) -> None:
+    """Refuse an anchor the log's own writer could reach.
+
+    Two ways that happens: the anchor sits in the audit directory, which is
+    mounted into the proxy container, or it sits in the project directory,
+    which is mounted into the install container. Either makes the anchor
+    forgeable by the thing it exists to check.
+    """
+    anchor_path = Path(anchor_path).resolve()
+    audit_dir = Path(audit_path).resolve().parent
+    project_dir = Path(project_dir).resolve()
+
+    if anchor_path.parent == audit_dir:
+        raise RunnerError(
+            f"anchor store {anchor_path} is in the audit directory, which is "
+            f"mounted into the proxy container. The process that writes the log "
+            f"could rewrite its own anchor. Choose a path outside {audit_dir}."
+        )
+    try:
+        anchor_path.relative_to(project_dir)
+    except ValueError:
+        return
+    raise RunnerError(
+        f"anchor store {anchor_path} is inside the project directory, which is "
+        f"mounted writable into the sandbox. Choose a path outside {project_dir}."
+    )
+
+
 def default_audit_path(project_dir: Path) -> Path:
     """A per-project log outside the project, so the sandbox cannot reach it."""
     project_dir = Path(project_dir).resolve()
@@ -578,6 +633,7 @@ def run_install(
     project_dir: Path,
     image: Optional[str] = None,
     audit_path: Optional[Path] = None,
+    anchor_path: Optional[Path] = None,
     enabled_conditions: Optional[Set[str]] = None,
     runtime: Optional[str] = None,
     host_env: Optional[Mapping[str, str]] = None,
@@ -591,8 +647,10 @@ def run_install(
     runtime = runtime or detect_runtime()
     project_dir = Path(project_dir).resolve()
     audit_path = Path(audit_path) if audit_path else default_audit_path(project_dir)
+    anchor_path = Path(anchor_path) if anchor_path else default_anchor_path(project_dir)
 
     assert_audit_log_unreachable(audit_path, project_dir)
+    assert_anchor_store_unreachable(anchor_path, audit_path, project_dir)
 
     image = image or default_image_for(policy.ecosystem)
 
@@ -603,13 +661,15 @@ def run_install(
     env = dict(strip_environment(host_env if host_env is not None else os.environ).passed)
     env.update(PROXY_ENV)
 
+    run_id = uuid.uuid4().hex
+
     with ProxySidecar(
         policy.ecosystem,
         audit_path=audit_path,
         runtime=runtime,
         enabled_conditions=enabled_conditions,
     ):
-        return run_sandboxed(
+        result = run_sandboxed(
             command,
             project_dir,
             image,
@@ -618,3 +678,9 @@ def run_install(
             network=INTERNAL_NETWORK,
             timeout=timeout,
         )
+
+    # Anchored here, on the host, after the sidecar is gone. A different
+    # process from the one that wrote the log, writing to a store that process
+    # never had mounted.
+    AnchorStore(anchor_path).append(run_id, audit_path, AuditLog(audit_path).read_all())
+    return result

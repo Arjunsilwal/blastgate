@@ -56,12 +56,17 @@ def project():
 
 @pytest.fixture
 def audit(project):
+    from bulkhead.runner import default_anchor_path
+
     path = default_audit_path(project)
-    if path.exists():
-        path.unlink()
+    anchors = default_anchor_path(project)
+    for artefact in (path, anchors):
+        if artefact.exists():
+            artefact.unlink()
     yield path
-    if path.exists():
-        path.unlink()
+    for artefact in (path, anchors):
+        if artefact.exists():
+            artefact.unlink()
 
 
 def reach(host):
@@ -178,3 +183,64 @@ class TestARealInstall:
         assert result.exit_code == 0, f"install failed: {result.stderr[-800:]}"
         assert (project / "node_modules" / "is-odd").is_dir()
         assert AuditLog(audit).verify() is True
+
+
+class TestAnchoring:
+    """The anchor is written by the host runner, not by the proxy.
+
+    That separation is the control. The proxy container writes the audit log
+    and has the audit directory mounted; it has never seen the anchor store.
+    """
+
+    def test_a_run_writes_an_anchor(self, project, audit):
+        from bulkhead.audit import AnchorStore
+        from bulkhead.runner import default_anchor_path
+
+        anchor_path = default_anchor_path(project)
+        install(["python", "-c", reach("registry.npmjs.org")], project, audit)
+
+        store = AnchorStore(anchor_path)
+        assert store.verify() is True
+        anchor = store.latest_for(audit)
+        assert anchor is not None and anchor.entry_count >= 1
+        AuditLog(audit).verify_against_anchor(anchor)
+
+    def test_truncating_the_log_after_a_run_is_detected(self, project, audit):
+        from bulkhead.audit import AnchorStore, TamperError
+        from bulkhead.runner import default_anchor_path
+
+        script = reach("registry.npmjs.org") + reach("exfil.attacker.test")
+        install(["python", "-c", script], project, audit)
+
+        anchor = AnchorStore(default_anchor_path(project)).latest_for(audit)
+        lines = audit.read_text().splitlines()
+        assert len(lines) >= 2
+        # Drop the denial, which is exactly what an attacker would remove.
+        audit.write_text("\n".join(lines[:-1]) + "\n")
+
+        log = AuditLog(audit)
+        assert log.verify() is True
+        with pytest.raises(TamperError, match="truncated"):
+            log.verify_against_anchor(anchor)
+
+    def test_the_sandbox_cannot_see_the_anchor_store(self, project, audit):
+        from bulkhead.runner import default_anchor_path
+
+        anchor_path = default_anchor_path(project)
+        install(["python", "-c", reach("registry.npmjs.org")], project, audit)
+        result = install(
+            ["sh", "-c", f"test -e {anchor_path} && echo VISIBLE || echo INVISIBLE"],
+            project, audit,
+        )
+        assert "INVISIBLE" in result.stdout
+
+    def test_an_anchor_beside_the_audit_log_is_refused(self, project, audit):
+        # The audit directory is mounted into the proxy container. An anchor
+        # there could be rewritten by the process that writes the log.
+        from bulkhead.runner import RunnerError
+
+        with pytest.raises(RunnerError, match="audit directory"):
+            install(
+                ["true"], project, audit,
+                anchor_path=audit.parent / "sneaky.anchors",
+            )

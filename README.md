@@ -103,6 +103,24 @@ nowhere else, so the sandbox cannot read or delete it. Pointing `--audit` inside
 the project directory is refused, because the project is mounted writable and a
 log the payload can rewrite is not evidence.
 
+After each run the *host-side runner* — a different process, which the sandbox
+cannot reach and which the proxy has never had mounted — records the log's head
+hash and entry count in a separate anchor store. Truncating a log no longer
+passes verification, and anchors are chained across runs so deleting a whole run
+is equally visible.
+
+`bh audit` distinguishes two verdicts that a hash chain alone conflates:
+
+```
+OK: chain verified against anchor, 12 entries (anchored at 12 by run 4f2a91c0)
+UNANCHORED: chain is internally consistent, 12 entries.
+    No anchor found, so truncation cannot be detected.
+```
+
+Anchoring is not provenance. It raises the bar from writing one file to writing
+two consistently. An attacker with write access to both stores forges both, and
+that limit is asserted by a test so it cannot be quietly assumed closed.
+
 ## Run an install
 
 Requires Docker or Podman.

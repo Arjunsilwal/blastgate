@@ -53,6 +53,12 @@ secrets.yaml
 audit.log
 .bulkhead/
 
+# Planning documents.
+# Working notes that describe intent, not the record of what was built. The
+# threat model and README are the published account; these are drafts and stay
+# local. Anchored to the repository root so a docs/ file is unaffected.
+/V[0-9]*.md
+
 # Editors
 .vscode/
 .idea/

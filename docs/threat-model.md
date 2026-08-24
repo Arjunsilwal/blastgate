@@ -14,7 +14,7 @@ wired to any package manager. **Nothing in section 6 constitutes protection of a
 real install today.** See section 7 for the precise gap between design and
 implementation.
 
-Document version: 6. Last reviewed: 2026-08-22.
+Document version: 7. Last reviewed: 2026-08-22.
 
 **Design note, recorded because it departs from the v0 plan.** The plan specified
 environment variables "filtered by shape (prefix, and any name containing TOKEN,
@@ -219,6 +219,12 @@ connectivity would satisfy every isolation assertion while proving nothing.
 | A gap that stops reproducing fails loudly rather than passing quietly *(constrains bulkhead)* | Closing a gap means the threat model is stale | `TestCorpusResults::test_disclosed_gaps_still_reproduce` |
 | A malformed scenario is refused rather than skipped *(constrains bulkhead)* | Dropping one would inflate the rate | `TestSchema::test_a_malformed_scenario_is_loud_not_skipped` |
 | The published pass rate matches what the corpus scores *(constrains bulkhead)* | README is generated, and a test fails if it drifts | `TestCorpusResults::test_the_published_number_matches_the_corpus` |
+| Truncating an audit log is detected | Anchor records head hash and entry count | `test_audit.py::TestDisclosedLimits::test_truncating_the_tail_IS_detected_against_an_anchor` |
+| Truncating a log written by a real run is detected *(runtime)* | Anchor written by the host runner after the sidecar stops | `test_end_to_end.py::TestAnchoring::test_truncating_the_log_after_a_run_is_detected` |
+| Removing a whole run's anchor is detected | Anchors are chained across runs | `TestAnchorStore::test_removing_a_whole_run_breaks_the_anchor_chain` |
+| The sandbox cannot see the anchor store *(runtime)* | Separate directory, mounted nowhere | `TestAnchoring::test_the_sandbox_cannot_see_the_anchor_store` |
+| An anchor beside the audit log is refused *(constrains bulkhead)* | That directory is mounted into the proxy, so the log's writer could forge its own anchor | `TestAnchoring::test_an_anchor_beside_the_audit_log_is_refused` |
+| An unanchored log is not reported as verified *(constrains bulkhead)* | `UNANCHORED` is a distinct verdict | `TestCliAudit::test_an_unanchored_log_does_not_report_as_verified` |
 
 Two deliberate properties worth stating because they surprise people:
 
@@ -324,15 +330,20 @@ to read it and not find a gap that was left undisclosed.
 - **Unicode and IDN hostnames are rejected outright**, not punycode-normalized.
   This is fail-closed and may produce false negatives on legitimate
   internationalized hosts.
-- **Audit truncation is not detected.** Removing the most recent entries leaves
-  a shorter chain that still verifies. Detecting this requires anchoring the head
-  somewhere the writer cannot reach, which bulkhead does not do. Asserted
-  explicitly in `TestDisclosedLimits::test_truncating_the_tail_is_NOT_detected`
-  so the limit cannot be quietly assumed closed.
-- **The audit log proves consistency, not provenance.** An attacker who can write
-  the file can replace it wholesale with a valid chain of their own. The chain is
-  only meaningful while the log lives somewhere the install container cannot
-  reach, which depends on the topology and is not built.
+- **Audit truncation is detected only where an anchor exists.** The hash chain
+  alone still cannot see it — a shorter chain verifies fine, asserted in
+  `test_truncating_the_tail_is_not_detected_by_the_chain_alone`. What closes it
+  is the anchor store, written after each run by the host-side runner rather
+  than by the proxy that writes the log. A log with no anchor reports
+  `UNANCHORED`, never `OK`, because "internally consistent" and "complete" are
+  different claims and printing them identically would hide this limit.
+- **The audit log proves consistency, not provenance.** Anchoring raises the bar
+  from writing one file to writing two, in two directories, the second of which
+  is chained across runs. It is not provenance. An attacker with write access to
+  both stores forges both, asserted in
+  `test_replacement_is_NOT_detected_if_both_stores_are_rewritten`. Closing this
+  needs an anchor this machine cannot alter — an external service, a key held in
+  an OS keychain, or an offline record — none of which bulkhead has.
 - **The environment filter is blind to values.** It decides by variable *name*
   only. A secret stored under a name like `BUILD_NUMBER` is not recognised as a
   secret, and would be forwarded if the user asked for it by name. Shape

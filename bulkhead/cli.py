@@ -16,10 +16,21 @@ from pathlib import Path
 import sys
 from typing import List, Optional
 
-from bulkhead.audit import AuditError, AuditLog, TamperError
+from bulkhead.audit import (
+    AnchorStore,
+    AuditError,
+    AuditLog,
+    TamperError,
+    format_entry_count,
+)
 from bulkhead.policy import PolicyError, load_policy
 from bulkhead.proxy import run_proxy_server
-from bulkhead.runner import RunnerError, default_audit_path, run_install
+from bulkhead.runner import (
+    RunnerError,
+    anchor_path_for_audit,
+    default_audit_path,
+    run_install,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -139,6 +150,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Check the chain and print nothing but the verdict",
     )
+    audit_parser.add_argument(
+        "--anchor",
+        type=Path,
+        default=None,
+        help="Anchor store to verify against (default: the one matching this log)",
+    )
+    audit_parser.add_argument(
+        "--no-anchor",
+        action="store_true",
+        help="Verify the chain alone, without checking its anchor",
+    )
+    audit_parser.add_argument(
+        "--require-anchor",
+        action="store_true",
+        help="Exit non-zero if no anchor exists. Use in CI, where 'truncation "
+             "cannot be detected' should not pass silently.",
+    )
 
     return parser
 
@@ -242,9 +270,28 @@ def main(args: Optional[List[str]] = None) -> int:
 
     if parsed_args.command == "audit":
         log = AuditLog(parsed_args.path)
+
+        anchor = None
+        anchor_store_path = None
+        if not parsed_args.no_anchor:
+            anchor_store_path = parsed_args.anchor or anchor_path_for_audit(parsed_args.path)
+            try:
+                store = AnchorStore(anchor_store_path)
+                store.verify()
+                anchor = store.latest_for(parsed_args.path)
+            except TamperError as e:
+                sys.stderr.write(f"TAMPERED: anchor store: {e}\n")
+                return 1
+            except AuditError as e:
+                sys.stderr.write(f"Error: {e}\n")
+                return 2
+
         try:
             entries = log.read_all()
-            log.verify(entries)
+            if anchor is not None:
+                log.verify_against_anchor(anchor, entries)
+            else:
+                log.verify(entries)
         except TamperError as e:
             # Loud by design. A log that does not verify is the one output
             # nobody should be able to overlook.
@@ -263,8 +310,23 @@ def main(args: Optional[List[str]] = None) -> int:
                     f"{entry.host}  ({rule})\n"
                 )
 
-        sys.stdout.write(f"OK: chain verified, {len(entries)} entries\n")
-        return 0
+        if anchor is not None:
+            sys.stdout.write(
+                f"OK: chain verified against anchor, {format_entry_count(len(entries))} "
+                f"(anchored at {anchor.entry_count} by run {anchor.run_id[:8]})\n"
+            )
+            return 0
+
+        # Deliberately not the same word as a verified log. The chain being
+        # internally consistent says nothing about entries removed from the
+        # end, and reporting both states identically would hide that.
+        sys.stdout.write(
+            f"UNANCHORED: chain is internally consistent, {format_entry_count(len(entries))}.\n"
+            f"    No anchor found"
+            + (f" at {anchor_store_path}" if anchor_store_path else " (--no-anchor)")
+            + ", so truncation cannot be detected.\n"
+        )
+        return 1 if parsed_args.require_anchor else 0
 
     if parsed_args.command == "check":
         try:
