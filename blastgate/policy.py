@@ -73,6 +73,23 @@ class Policy:
         self._exact_map: Dict[str, ExactRule] = {r.host: r for r in self.exact_rules}
         self._conditional_map: Dict[str, ConditionalRule] = {r.host: r for r in self.conditional_rules}
 
+    def extended_with(self, extra: Sequence[ExactRule]) -> "Policy":
+        """A copy with additional exact hosts, tagged so their origin is visible.
+
+        The audit log should never leave a reader guessing whether a host was
+        allowed because the project shipped with it or because someone added it
+        locally.
+        """
+        tagged = [
+            ExactRule(host=r.host, reason=f"[project] {r.reason}") for r in extra
+        ]
+        return Policy(
+            ecosystem=self.ecosystem,
+            exact_rules=list(self.exact_rules) + tagged,
+            wildcard_rules=self.wildcard_rules,
+            conditional_rules=self.conditional_rules,
+        )
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Policy":
         """Parse and validate policy data from a dictionary."""
@@ -366,10 +383,68 @@ def _get_default_allowlists_dir() -> Path:
     return Path(__file__).resolve().parent / "allowlists"
 
 
-def load_policy(ecosystem: str, allowlists_dir: Optional[Path] = None) -> Policy:
-    """Load policy for the specified ecosystem (e.g. npm, pypi, cargo)."""
+PROJECT_CONFIG_NAME = ".blastgate.yaml"
+
+
+def load_project_allowances(project_dir: Path) -> List[ExactRule]:
+    """Extra hosts a project declares it needs.
+
+    A project can widen its own allowlist and cannot narrow anything else. There
+    is no way to switch off the proxy here, open a port, disable anchoring, or
+    turn a denial into an allow for a host policy refuses on other grounds.
+    Configuration that can remove a control is configuration an attacker only
+    has to reach once.
+
+    Every entry carries a reason, for the same purpose it does in the shipped
+    allowlists: adding a host to this file is widening egress, and the diff
+    should say why in words a reviewer can disagree with.
+    """
+    path = Path(project_dir) / PROJECT_CONFIG_NAME
+    if not path.is_file():
+        return []
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as e:
+        raise PolicyError(f"{path} is not valid YAML: {e}")
+    if not isinstance(data, dict):
+        raise PolicyError(f"{path} must contain a mapping")
+
+    unknown = set(data) - {"version", "allow"}
+    if unknown:
+        # Loudly, rather than ignoring it. A key that looks like it disables
+        # something and is silently skipped is worse than an error.
+        raise PolicyError(
+            f"{path}: unsupported key(s) {sorted(unknown)}. This file may only "
+            f"add hosts under 'allow'; it cannot disable or weaken a control."
+        )
+
+    rules = []
+    for item in data.get("allow") or []:
+        if not isinstance(item, dict) or "host" not in item:
+            raise PolicyError(f"{path}: each allow entry needs a 'host'")
+        reason = (item.get("reason") or "").strip()
+        if not reason:
+            raise PolicyError(
+                f"{path}: '{item['host']}' has no reason. Every added host needs "
+                f"one, because adding it widens what an install can reach."
+            )
+        rules.append(ExactRule(host=Policy.normalize_host(item["host"]), reason=reason))
+    return rules
+
+
+def load_policy(
+    ecosystem: str,
+    allowlists_dir: Optional[Path] = None,
+    project_dir: Optional[Path] = None,
+) -> Policy:
+    """Load policy for an ecosystem, plus anything the project adds."""
     base_dir = allowlists_dir if allowlists_dir is not None else _get_default_allowlists_dir()
     policy_file = base_dir / f"{ecosystem}.yaml"
     if not policy_file.is_file():
         raise PolicyError(f"No allowlist found for ecosystem '{ecosystem}' at {policy_file}")
-    return Policy.from_file(policy_file)
+    policy = Policy.from_file(policy_file)
+    if project_dir is not None:
+        extra = load_project_allowances(project_dir)
+        if extra:
+            policy = policy.extended_with(extra)
+    return policy

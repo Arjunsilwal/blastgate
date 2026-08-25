@@ -26,7 +26,7 @@ from blastgate.audit import (
     TamperError,
     format_entry_count,
 )
-from blastgate.policy import PolicyError, load_policy
+from blastgate.policy import PROJECT_CONFIG_NAME, PolicyError, load_policy
 from blastgate.proxy import run_proxy_server
 from blastgate.runner import (
     RunnerError,
@@ -37,6 +37,58 @@ from blastgate.runner import (
 
 
 SCHEMA = "blastgate.run/1"
+
+# Tools that can be invoked directly: `blast npm ci` instead of
+# `blast run npm -- npm ci`. Only tools an image here can actually run appear.
+# A shim for something that is not installed produces "yarn: not found", which
+# tells the user nothing about why.
+SHIM_TOOLS = {
+    "npm": "npm",
+    "pip": "pypi",
+    "pip3": "pypi",
+    "cargo": "cargo",
+}
+
+UNSUPPORTED_TOOLS = {
+    "yarn": "npm", "pnpm": "npm", "poetry": "pypi", "uv": "pypi",
+}
+
+
+def expand_shim(args: List[str]) -> List[str]:
+    """Rewrite `blast npm ci` into the explicit `blast run npm -- npm ci`.
+
+    The explicit form still works and is the only one that takes blastgate's own
+    options, because a shim that also parsed them would have to guess which side
+    of the command each flag belonged to.
+    """
+    if not args or args[0] not in SHIM_TOOLS:
+        return args
+    tool = args[0]
+    return ["run", SHIM_TOOLS[tool], "--"] + args
+
+
+def project_config_hint(hosts, project) -> str:
+    """What to actually do about a refused host.
+
+    A denial that only says "denied" leaves the user to work out where the
+    allowlist lives and what shape an entry takes. Most will not; they will
+    stop using the tool instead.
+    """
+    lines = [
+        f"    if these are legitimate, add them to "
+        f"{Path(project) / PROJECT_CONFIG_NAME}:",
+        "",
+        "      version: 1",
+        "      allow:",
+    ]
+    for host in sorted(hosts):
+        lines += [f"        - host: {host}", '          reason: "why this install needs it"']
+    lines += [
+        "",
+        "    a host added there is reachable by every install in this project,",
+        "    including one running code from a package you did not write.",
+    ]
+    return "\n".join(lines)
 
 # Exit codes, so a pipeline can branch on them.
 EXIT_OK = 0
@@ -319,7 +371,17 @@ def main(args: Optional[List[str]] = None) -> int:
     if args is None:
         args = sys.argv[1:]
 
-    args, sandbox_command = split_on_separator(list(args))
+    args = expand_shim(list(args))
+    args, sandbox_command = split_on_separator(args)
+
+    if args and args[0] in UNSUPPORTED_TOOLS:
+        sys.stderr.write(
+            f"blast: {args[0]} is not supported yet. Its ecosystem "
+            f"({UNSUPPORTED_TOOLS[args[0]]}) is, so the allowlist exists, but no "
+            f"image here ships {args[0]}.\n"
+            f"    supported directly: {', '.join(sorted(SHIM_TOOLS))}\n"
+        )
+        return EXIT_REFUSED
 
     parser = build_parser()
     try:
@@ -401,15 +463,16 @@ def main(args: Optional[List[str]] = None) -> int:
             )
             return 2
 
+        project = (parsed_args.project or Path.cwd()).resolve()
         try:
             policy = load_policy(
-                parsed_args.ecosystem, allowlists_dir=parsed_args.allowlists_dir
+                parsed_args.ecosystem,
+                allowlists_dir=parsed_args.allowlists_dir,
+                project_dir=project,
             )
         except PolicyError as e:
             sys.stderr.write(f"Error: {e}\n")
             return 2
-
-        project = (parsed_args.project or Path.cwd()).resolve()
         # Not inside the project: that directory is mounted writable into the
         # sandbox, so a log there is one the payload can rewrite.
         audit_path = parsed_args.audit or default_audit_path(project)
@@ -451,6 +514,8 @@ def main(args: Optional[List[str]] = None) -> int:
             sys.stderr.write(
                 f"blast: {len(unexpected)} request(s) reached for host(s) the "
                 f"allowlist does not name: {hosts}\n"
+                + project_config_hint({d["host"] for d in unexpected}, project)
+                + "\n"
             )
             if parsed_args.fail_on_unexpected_egress:
                 return EXIT_UNEXPECTED_EGRESS

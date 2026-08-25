@@ -14,7 +14,7 @@ wired to any package manager. **Nothing in section 6 constitutes protection of a
 real install today.** See section 7 for the precise gap between design and
 implementation.
 
-Document version: 17. Last reviewed: 2026-08-22.
+Document version: 18. Last reviewed: 2026-08-22.
 
 **Design note, recorded because it departs from the v0 plan.** The plan specified
 environment variables "filtered by shape (prefix, and any name containing TOKEN,
@@ -539,6 +539,15 @@ and they are not nothing.
   are addressed by the mount boundary, which is not built. Until it is, the
   environment filter protects against one of the two harvest routes and the more
   valuable one remains open.
+- **`.blastgate.yaml` is trusted input, and it lives in the repository.** A
+  project can add hosts to its own allowlist. It cannot disable the proxy, open
+  a port, turn off anchoring, or override a denial made on other grounds -
+  every unrecognised key is refused rather than ignored, and every added host
+  needs a written reason. But a pull request that adds a host is a pull request
+  that widens what every install in that repository can reach, including code
+  from a package nobody read. It deserves the same review as a change to the
+  shipped allowlists. Hosts added this way are tagged `[project]` in the audit
+  log so their origin is never in doubt.
 - **Allowlist trust.** The shipped allowlists are trusted input. A bad entry
   merged into this repository is a direct compromise of the control, which is why
   every entry carries a reason and allowlist changes are reviewed as security

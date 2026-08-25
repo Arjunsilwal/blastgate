@@ -9,6 +9,9 @@ about the threat model, because that is the part worth reading.
 - **Credential brokering.** `blast creds` stores a registry credential on the
   host; the proxy attaches it to upstream requests so the install never holds
   it. Reads only, so a payload cannot publish through the broker. npm and pypi.
+- **Project configuration and a shim.** `blast npm ci` as shorthand, and a
+  `.blastgate.yaml` that can add hosts to a project's allowlist and nothing
+  else. A denial now prints the exact entry to add, and what adding it costs.
 - **CI integration.** A composite GitHub Action, a JSON run summary, and exit
   code 3 for "the install succeeded but reached for a host nobody listed".
   Denials of hosts the allowlist names are recorded rather than escalated, so

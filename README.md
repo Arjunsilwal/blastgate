@@ -107,6 +107,28 @@ Read it as "no false positives found in sixteen projects", not as a rate.
 - **Untested entirely:** private registries, authenticated `.npmrc`, workspace
   monorepos, yarn, and pnpm.
 
+## When something is denied
+
+A refusal tells you what to do about it:
+
+```
+blast: 1 request(s) reached for host(s) the allowlist does not name: artifacts.internal.test
+    if these are legitimate, add them to /path/to/project/.blastgate.yaml:
+
+      version: 1
+      allow:
+        - host: artifacts.internal.test
+          reason: "why this install needs it"
+
+    a host added there is reachable by every install in this project,
+    including one running code from a package you did not write.
+```
+
+`.blastgate.yaml` can **only add hosts**. Any key that could disable the proxy,
+open a port, or turn off anchoring is refused rather than ignored, and every
+entry needs a reason — adding a host widens egress, and the diff should say why.
+Hosts added this way appear as `[project]` in the audit log.
+
 ## In CI
 
 ```yaml
