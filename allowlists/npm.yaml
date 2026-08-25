@@ -20,7 +20,7 @@ wildcard:
 # to a forge and no rule that would allow one.
 #
 # They stay listed because policy still has to name them to deny them, and
-# because `bh check npm github.com --allow git-dependencies` should keep
+# because `blast check npm github.com --allow git-dependencies` should keep
 # answering the question it has always answered: is this host in the allowlist.
 conditional:
   - host: github.com

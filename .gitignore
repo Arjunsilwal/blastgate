@@ -46,12 +46,12 @@ htmlcov/
 credentials.json
 secrets.yaml
 
-# Bulkhead runtime output.
+# Blastgate runtime output.
 # Audit logs record real hostnames from real installs and are local artifacts,
 # not repository content.
 *.log
 audit.log
-.bulkhead/
+.blastgate/
 
 # Planning documents.
 # Working notes that describe intent, not the record of what was built. The

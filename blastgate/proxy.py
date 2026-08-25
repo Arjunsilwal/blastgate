@@ -18,8 +18,8 @@ from dataclasses import dataclass
 import re
 from typing import Optional, Set, Tuple
 
-from bulkhead.audit import AuditLog
-from bulkhead.policy import Policy
+from blastgate.audit import AuditLog
+from blastgate.policy import Policy
 
 
 # Ports the proxy will tunnel to. Registry traffic is HTTPS, and restricting

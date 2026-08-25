@@ -24,10 +24,10 @@ try:                                  # Python 3.11+
 except ModuleNotFoundError:           # 3.10, via the backport
     import tomli as tomllib
 
-from bulkhead import BulkheadError
+from blastgate import BlastgateError
 
 
-class ResolveError(BulkheadError):
+class ResolveError(BlastgateError):
     """A project's dependency set cannot be determined."""
 
 
@@ -41,7 +41,7 @@ class ResolveError(BulkheadError):
 # confidence is refused rather than guessed at, because a guess here turns into
 # either a missing dependency or an unexpected host.
 
-GIT_CACHE_DIR = Path.home() / ".bulkhead" / "git-cache"
+GIT_CACHE_DIR = Path.home() / ".blastgate" / "git-cache"
 
 # Hosts a declared dependency may be fetched from during resolution. Kept in
 # step with allowlists/npm-resolve.yaml; policy is still the decider, this is
@@ -156,7 +156,7 @@ def parse_git_spec(name: str, spec: str) -> Optional[GitDependency]:
     if _UNENCRYPTED_RE.match(spec):
         raise UnresolvableDependencyError(
             f"dependency {name!r} uses the unencrypted git:// protocol ({spec!r}). "
-            f"Bulkhead only tunnels TLS, so this cannot be fetched or enforced. "
+            f"Blastgate only tunnels TLS, so this cannot be fetched or enforced. "
             f"Change it to https:// in your manifest."
         )
 
@@ -274,7 +274,7 @@ def _read_json(path: Path) -> dict:
 
 
 GIT_IMAGE = "alpine/git:latest"
-CACHE_MOUNT = "/bulkhead-git"
+CACHE_MOUNT = "/blastgate-git"
 GITCONFIG_NAME = "gitconfig"
 
 
@@ -381,7 +381,7 @@ def parse_pip_requirement(line: str) -> Optional[GitDependency]:
     if _UNENCRYPTED_RE.match(line) or line.startswith("git://"):
         raise UnresolvableDependencyError(
             f"requirement {line!r} uses the unencrypted git:// protocol. "
-            f"Bulkhead only tunnels TLS. Change it to https://."
+            f"Blastgate only tunnels TLS. Change it to https://."
         )
 
     match = _PIP_GIT_RE.match(line)
@@ -455,7 +455,7 @@ def parse_cargo_source(name: str, source: str) -> Optional[GitDependency]:
     if source.startswith("git://") or _UNENCRYPTED_RE.match(source):
         raise UnresolvableDependencyError(
             f"dependency {name!r} uses the unencrypted git:// protocol. "
-            f"Bulkhead only tunnels TLS. Change it to https://."
+            f"Blastgate only tunnels TLS. Change it to https://."
         )
     if not source.startswith("git+"):
         # registry sources look like "registry+https://github.com/rust-lang/

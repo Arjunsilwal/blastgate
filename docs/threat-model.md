@@ -1,14 +1,14 @@
 # Threat model
 
-**Status: pre-alpha. Bulkhead currently enforces nothing.**
+**Status: pre-alpha. Blastgate currently enforces nothing.**
 
-This document is the specification for what bulkhead is meant to prevent, written
+This document is the specification for what blastgate is meant to prevent, written
 before the code that would prevent it. Every later design decision resolves back
 to this file. If a change alters what the tool protects against, this file changes
 in the same commit.
 
 At the time of writing, the only implemented component is the policy engine
-(`bulkhead/policy.py`), which answers "is this host on the allowlist?" as a pure
+(`blastgate/policy.py`), which answers "is this host on the allowlist?" as a pure
 function. It does not isolate anything, does not intercept traffic, and is not
 wired to any package manager. **Nothing in section 6 constitutes protection of a
 real install today.** See section 7 for the precise gap between design and
@@ -91,7 +91,7 @@ Two controls, no detection:
 The design principle: *it should not matter how the code got execution, because
 there is nothing to steal and nowhere to send it.*
 
-This is a containment argument, not a detection argument. Bulkhead does not try to
+This is a containment argument, not a detection argument. Blastgate does not try to
 decide whether a package is malicious. It assumes every package is malicious and
 constrains what that can accomplish.
 
@@ -120,7 +120,7 @@ Stated explicitly:
 
 - **Untrusted:** all package code, all registry content, all package metadata,
   every byte inside the install container, and every string the proxy parses.
-- **Trusted:** the host, the container runtime, the base images, bulkhead's own
+- **Trusted:** the host, the container runtime, the base images, blastgate's own
   code, and the allowlist files in this repository.
 - **The boundary** is the install container's network namespace and mount
   namespace. The security property is intended to be *topological* — the install
@@ -137,9 +137,9 @@ Assumed capabilities:
 
 - Arbitrary code execution inside the install container, as the install user, at
   install time.
-- Full knowledge of bulkhead's source, allowlists, and this document.
+- Full knowledge of blastgate's source, allowlists, and this document.
 - Ability to publish arbitrary package content to a public registry, including
-  content targeting bulkhead specifically.
+  content targeting blastgate specifically.
 - Ability to control DNS responses for hosts they own, and to operate services on
   arbitrary ports at hosts they control.
 
@@ -158,7 +158,7 @@ Most rows below are properties of *pure functions* — they say the decision is
 correct, not that an install is constrained. The rows marked *(runtime)* are
 different: they are demonstrated against a real container runtime in
 `tests/test_topology.py` and do constrain a running process. Rows marked
-*(constrains bulkhead)* limit this tool's own behaviour rather than an
+*(constrains blastgate)* limit this tool's own behaviour rather than an
 attacker's.
 
 The runtime rows depend on a control test asserting that a container on the
@@ -180,14 +180,14 @@ connectivity would satisfy every isolation assertion while proving nothing.
 | A host commonly needed but usable for exfiltration is denied unless opted into | Conditional tier, off by default | `TestConditionalRules::test_conditional_denied_by_default` |
 | Enabling one condition does not enable another | Conditions matched by name | `TestConditionalRules::test_conditional_denied_when_different_condition_enabled` |
 | An allowlist entry without a stated reason is rejected at load | Schema validation | `TestPolicySchemaAndLoading::test_rule_without_reason_raises` |
-| `bh run` never falls back to an unsandboxed install *(constrains bulkhead)* | Every error path refuses; no fallback branch in the CLI | `TestCliRun::test_run_refuses_when_no_runtime_is_available`, `::test_run_refuses_an_audit_log_inside_the_project` |
-| Bulkhead's own options are not swallowed into the install command *(constrains bulkhead)* | `--` split before argparse; REMAINDER would silently drop `--audit` | `TestCliRun::test_bulkhead_options_are_not_swallowed_into_the_command` |
+| `blast run` never falls back to an unsandboxed install *(constrains blastgate)* | Every error path refuses; no fallback branch in the CLI | `TestCliRun::test_run_refuses_when_no_runtime_is_available`, `::test_run_refuses_an_audit_log_inside_the_project` |
+| Blastgate's own options are not swallowed into the install command *(constrains blastgate)* | `--` split before argparse; REMAINDER would silently drop `--audit` | `TestCliRun::test_blastgate_options_are_not_swallowed_into_the_command` |
 | A host environment variable does not reach the sandbox unless it was named | Default-deny allowlist over variable names | `test_runner.py::TestDefaultDeny::test_unknown_variable_is_withheld`, `::test_variable_invented_tomorrow_is_withheld` |
 | A credential variable from a real registry campaign does not reach the sandbox | Same allowlist; 24 real names asserted | `TestDefaultDeny::test_real_credential_names_are_withheld` |
-| Host proxy settings are not inherited into the sandbox | Withheld by default; bulkhead sets its own | `TestDefaultDeny::test_proxy_settings_are_not_inherited` |
+| Host proxy settings are not inherited into the sandbox | Withheld by default; blastgate sets its own | `TestDefaultDeny::test_proxy_settings_are_not_inherited` |
 | Registry-redirection variables are not inherited into the sandbox | Withheld by default | `TestDefaultDeny::test_registry_redirection_is_not_inherited` |
-| A user cannot forward a credential-shaped variable into the sandbox *(constrains bulkhead)* | Second-layer shape check; fails closed on explicit request | `TestExplicitForwarding::test_forwarding_a_credential_fails_closed` |
-| An absent container runtime is a refusal, not a degraded mode *(constrains bulkhead)* | `detect_runtime` raises rather than returning a falsy value | `TestRuntimeDetection::test_missing_runtime_raises_rather_than_returning_none` |
+| A user cannot forward a credential-shaped variable into the sandbox *(constrains blastgate)* | Second-layer shape check; fails closed on explicit request | `TestExplicitForwarding::test_forwarding_a_credential_fails_closed` |
+| An absent container runtime is a refusal, not a degraded mode *(constrains blastgate)* | `detect_runtime` raises rather than returning a falsy value | `TestRuntimeDetection::test_missing_runtime_raises_rather_than_returning_none` |
 | A denial cannot be edited into an allow without detection | Hash-chained audit entries | `test_audit.py::TestTamperDetection::test_flipping_a_denial_to_an_allow_is_detected` |
 | An audit entry cannot be removed, reordered, or forged into the middle without detection | Each entry commits to its predecessor's hash | `TestTamperDetection::test_removing_a_middle_entry_is_detected`, `::test_reordering_entries_is_detected`, `::test_splicing_a_forged_entry_is_detected` |
 | Fixing an edited entry's own hash does not repair the chain | Later entries still commit to the original hash | `TestTamperDetection::test_recomputing_the_hash_after_editing_is_still_detected` |
@@ -204,47 +204,47 @@ connectivity would satisfy every isolation assertion while proving nothing.
 | The project directory is the only host mount *(runtime)* | Single bind mount; host home is absent | `TestMountBoundary::test_host_home_is_not_mounted`, `::test_only_one_host_mount_exists` |
 | The container runtime's socket is not exposed to the install *(runtime)* | Not mounted | `TestMountBoundary::test_docker_socket_is_not_mounted` |
 | Host credentials do not appear in the sandbox environment *(runtime)* | Filtered environment passed explicitly | `TestEnvironmentAtTheBoundary::test_host_credentials_do_not_appear_in_the_sandbox` |
-| A network that is not actually internal is refused *(constrains bulkhead)* | Internality is inspected, not inferred from the name | `TestNetworkIntegrity::test_non_internal_network_is_refused` |
+| A network that is not actually internal is refused *(constrains blastgate)* | Internality is inspected, not inferred from the name | `TestNetworkIntegrity::test_non_internal_network_is_refused` |
 | An allowlisted host is reachable through the proxy *(runtime)* | Sidecar joined to both networks | `test_end_to_end.py::TestTheWholeThing::test_an_allowlisted_host_is_reachable_through_the_proxy` |
 | A denied host is not reachable from a real install *(runtime)* | Policy enforced at the proxy | `TestTheWholeThing::test_a_denied_host_is_not_reachable` |
 | A payload that ignores the proxy variables is still blocked *(runtime)* | Topology, not configuration: there is no route to find | `TestTheWholeThing::test_a_payload_that_ignores_the_proxy_is_still_blocked` |
 | The proxy is the only host the sandbox can open a socket to *(runtime)* | Internal network membership | `TestTheWholeThing::test_the_proxy_is_the_only_host_reachable` |
 | The audit log is not visible from inside the sandbox *(runtime)* | Audit directory mounted into the proxy container only | `TestTheAuditLog::test_the_sandbox_cannot_see_the_log` |
-| An audit log inside the project directory is refused *(constrains bulkhead)* | The project is mounted writable; a log there is one the payload can rewrite | `TestTheAuditLog::test_a_log_inside_the_project_is_refused` |
+| An audit log inside the project directory is refused *(constrains blastgate)* | The project is mounted writable; a log there is one the payload can rewrite | `TestTheAuditLog::test_a_log_inside_the_project_is_refused` |
 | A real `npm install` completes inside the sandbox *(runtime)* | Whole path end to end | `TestARealInstall::test_npm_install_succeeds_inside_the_sandbox` |
-| Every corpus scenario runs; none is silently skipped *(constrains bulkhead)* | Unrunnable scenarios are counted as failures | `test_attacks.py::TestCorpusResults::test_no_scenario_failed_to_run` |
+| Every corpus scenario runs; none is silently skipped *(constrains blastgate)* | Unrunnable scenarios are counted as failures | `test_attacks.py::TestCorpusResults::test_no_scenario_failed_to_run` |
 | No denied scenario gets through *(runtime)* | Corpus executed against the real sandbox | `TestCorpusResults::test_no_regressions` |
 | No legitimate scenario is broken *(runtime)* | Same | `TestCorpusResults::test_no_false_positives` |
-| A disclosed gap is counted as a failure, not omitted *(constrains bulkhead)* | Scoring treats `not_prevented` as failing | `TestScoring::test_a_disclosed_gap_that_still_reproduces_counts_against_the_rate` |
-| A gap that stops reproducing fails loudly rather than passing quietly *(constrains bulkhead)* | Closing a gap means the threat model is stale | `TestCorpusResults::test_disclosed_gaps_still_reproduce` |
-| A malformed scenario is refused rather than skipped *(constrains bulkhead)* | Dropping one would inflate the rate | `TestSchema::test_a_malformed_scenario_is_loud_not_skipped` |
+| A disclosed gap is counted as a failure, not omitted *(constrains blastgate)* | Scoring treats `not_prevented` as failing | `TestScoring::test_a_disclosed_gap_that_still_reproduces_counts_against_the_rate` |
+| A gap that stops reproducing fails loudly rather than passing quietly *(constrains blastgate)* | Closing a gap means the threat model is stale | `TestCorpusResults::test_disclosed_gaps_still_reproduce` |
+| A malformed scenario is refused rather than skipped *(constrains blastgate)* | Dropping one would inflate the rate | `TestSchema::test_a_malformed_scenario_is_loud_not_skipped` |
 | Deleting denials from the end of the audit log is caught | Corpus tampers with a real log and checks it against its anchor | `audit-truncation-is-detected` |
 | A project with a git dependency installs with every forge denied *(runtime)* | Corpus runs a real install end to end | `git-dependency-still-installs` |
 | Nothing in the resolve image can run a package lifecycle script *(runtime)* | No package manager and no interpreter present | `fetch-phase-runs-no-lifecycle-scripts` |
-| The corpus can score the tool worse than before *(constrains bulkhead)* | An added gap lowers the published rate | `TestScoring::test_adding_an_honest_gap_lowers_the_rate` |
-| The published pass rate matches what the corpus scores *(constrains bulkhead)* | README is generated, and a test fails if it drifts | `TestCorpusResults::test_the_published_number_matches_the_corpus` |
+| The corpus can score the tool worse than before *(constrains blastgate)* | An added gap lowers the published rate | `TestScoring::test_adding_an_honest_gap_lowers_the_rate` |
+| The published pass rate matches what the corpus scores *(constrains blastgate)* | README is generated, and a test fails if it drifts | `TestCorpusResults::test_the_published_number_matches_the_corpus` |
 | A denied hostname is never resolved | Policy is evaluated and refused before `open_connection` | `test_proxy.py::TestResolutionOrder::test_a_denied_host_is_never_resolved` |
 | DNS-tunnelled exfiltration does not leave the sandbox *(runtime)* | No resolver inside; the proxy resolves only allowed names | `dns-tunnelled-exfiltration` |
 | Truncating an audit log is detected | Anchor records head hash and entry count | `test_audit.py::TestDisclosedLimits::test_truncating_the_tail_IS_detected_against_an_anchor` |
 | Truncating a log written by a real run is detected *(runtime)* | Anchor written by the host runner after the sidecar stops | `test_end_to_end.py::TestAnchoring::test_truncating_the_log_after_a_run_is_detected` |
 | Removing a whole run's anchor is detected | Anchors are chained across runs | `TestAnchorStore::test_removing_a_whole_run_breaks_the_anchor_chain` |
 | The sandbox cannot see the anchor store *(runtime)* | Separate directory, mounted nowhere | `TestAnchoring::test_the_sandbox_cannot_see_the_anchor_store` |
-| An anchor beside the audit log is refused *(constrains bulkhead)* | That directory is mounted into the proxy, so the log's writer could forge its own anchor | `TestAnchoring::test_an_anchor_beside_the_audit_log_is_refused` |
-| An unanchored log is not reported as verified *(constrains bulkhead)* | `UNANCHORED` is a distinct verdict | `TestCliAudit::test_an_unanchored_log_does_not_report_as_verified` |
+| An anchor beside the audit log is refused *(constrains blastgate)* | That directory is mounted into the proxy, so the log's writer could forge its own anchor | `TestAnchoring::test_an_anchor_beside_the_audit_log_is_refused` |
+| An unanchored log is not reported as verified *(constrains blastgate)* | `UNANCHORED` is a distinct verdict | `TestCliAudit::test_an_unanchored_log_does_not_report_as_verified` |
 | The install phase never reaches a code forge *(runtime)* | Forge is absent from the install allowlist; deps come from a local mirror | `test_end_to_end.py::TestTwoPhaseResolution::test_the_install_phase_never_reaches_a_forge` |
 | A forge request during install is denied and logged *(runtime)* | npm does try; the denial is recorded rather than absent | `TestTwoPhaseResolution::test_a_forge_request_during_install_is_denied_and_logged` |
 | A project with a git dependency still installs *(runtime)* | Resolve phase plus local mirror | `TestTwoPhaseResolution::test_a_git_dependency_installs` |
 | The resolve phase cannot reach the registry | Separate allowlist naming forges only | `TestTwoPhaseResolution::test_the_resolve_policy_cannot_reach_the_registry` |
 | The git cache is read-only during install *(runtime)* | A writable cache would be a channel back into the phase with forge access | `TestTwoPhaseResolution::test_the_git_cache_is_read_only_in_the_install` |
-| Git dependencies without the resolve flag refuse the run *(constrains bulkhead)* | Fail closed rather than reach a forge | `TestTwoPhaseResolution::test_git_dependencies_without_the_flag_are_refused` |
+| Git dependencies without the resolve flag refuse the run *(constrains blastgate)* | Fail closed rather than reach a forge | `TestTwoPhaseResolution::test_git_dependencies_without_the_flag_are_refused` |
 | The crates.io registry source is not mistaken for a git dependency | Cargo.lock spells it as a GitHub URL | `test_resolve.py::TestCargoSources::test_the_crates_registry_is_not_a_git_dependency` |
 | A pypi or cargo install reaches a forge only during resolution *(runtime)* | Same two-phase split as npm | `test_end_to_end.py::TestResolveAcrossEcosystems::test_cargo_reaches_the_forge_only_in_the_resolve_phase` |
-| Every resolve-capable ecosystem has a parser, an allowlist and an image *(constrains bulkhead)* | Listing one without them removes the grant and breaks installs | `TestEveryCapableEcosystemHasAParser` |
+| Every resolve-capable ecosystem has a parser, an allowlist and an image *(constrains blastgate)* | Listing one without them removes the grant and breaks installs | `TestEveryCapableEcosystemHasAParser` |
 | A registry tarball URL is not mistaken for a git dependency | https URLs need `git+` or `.git` | `test_resolve.py::TestGitSpecParsing::test_dependencies_come_from_the_lockfile_too` |
-| An unparseable manifest refuses the run *(constrains bulkhead)* | Guessing the dependency set is worse than stopping | `test_resolve.py::TestGitSpecParsing::test_an_unparseable_manifest_refuses_rather_than_guesses` |
+| An unparseable manifest refuses the run *(constrains blastgate)* | Guessing the dependency set is worse than stopping | `test_resolve.py::TestGitSpecParsing::test_an_unparseable_manifest_refuses_rather_than_guesses` |
 | A shell metacharacter in a manifest cannot escape the clone script | Arguments are shell-quoted independently of the parser's charset | `test_resolve.py::TestCloneScript::test_shell_metacharacters_cannot_escape_the_script` |
-| A sidecar left by a killed run cannot serve the next one *(constrains bulkhead)* | Refuses to start when the internal network already has a proxy | `test_topology.py::TestStaleSidecar::test_a_stale_proxy_on_the_network_is_refused` |
-| The proxy image cannot enforce a stale allowlist *(constrains bulkhead)* | Image tag is derived from the source and allowlist contents, so a policy change forces a rebuild | `TestProxyImageFreshness::test_changing_an_allowlist_changes_the_image_tag` |
+| A sidecar left by a killed run cannot serve the next one *(constrains blastgate)* | Refuses to start when the internal network already has a proxy | `test_topology.py::TestStaleSidecar::test_a_stale_proxy_on_the_network_is_refused` |
+| The proxy image cannot enforce a stale allowlist *(constrains blastgate)* | Image tag is derived from the source and allowlist contents, so a policy change forces a rebuild | `TestProxyImageFreshness::test_changing_an_allowlist_changes_the_image_tag` |
 
 Two deliberate properties worth stating because they surprise people:
 
@@ -258,7 +258,7 @@ Two deliberate properties worth stating because they surprise people:
 
 These are the controls the argument in section 3 actually depends on. **None of
 them exist yet.** Until each ships with a test in `tests/attacks/` that fails when
-the control is removed, bulkhead prevents nothing about a real install.
+the control is removed, blastgate prevents nothing about a real install.
 
 | Control | Module | Status |
 |---|---|---|
@@ -273,7 +273,7 @@ the control is removed, bulkhead prevents nothing about a real install.
 | Executable attack scenario corpus | `tests/attacks/` | **Written and running** (section 6) |
 
 Every control in the design is built and demonstrated against a running
-install, and the attack corpus executes against the real sandbox. `bh run`
+install, and the attack corpus executes against the real sandbox. `blast run`
 works; a real `npm install` completes inside it with one allowed route out.
 
 The corpus scores **11 of 13 (85%)**, across five kinds of check: egress through
@@ -303,11 +303,11 @@ The next honest step is more scenarios drawn from real write-ups rather than
 constructed ones — every current scenario is marked `source: constructed`, and
 that is a real weakness in the evidence.
 
-Because none of the above exists, `bh run` refuses to execute rather than running
+Because none of the above exists, `blast run` refuses to execute rather than running
 an install without an enforcement point. This is the fail-closed default from
 section 8.3, applied to the tool's own incompleteness: a sandbox that is not
 built and a container runtime that is unavailable are the same condition, and
-both must refuse rather than degrade. The refusal is a property of bulkhead, not
+both must refuse rather than degrade. The refusal is a property of blastgate, not
 a protection against an attacker — it prevents a user from being misled into
 relying on an enforcement point that does not exist. It stops nothing that a
 malicious package does.
@@ -348,7 +348,7 @@ to read it and not find a gap that was left undisclosed.
 
 - **Container escape.** Isolation depends entirely on the container runtime. A
   payload with a working escape reaches the host and every credential on it.
-  Bulkhead adds a layer; it does not add a guarantee.
+  Blastgate adds a layer; it does not add a guarantee.
 - **Exfiltration through the registry.** Narrowed, not closed. The forge case is
   gone — see below — but the registry has to be reachable during an install,
   because that is what an install is, and any allowlisted host that accepts
@@ -367,7 +367,7 @@ to read it and not find a gap that was left undisclosed.
   gap requires reading what a project declares, which is manifest-specific. npm,
   pypi and cargo have parsers; anything added later does not until one is
   written for it. Such an ecosystem keeps the older, weaker arrangement — the
-  forge reachable for the whole install — and `bh run` warns when that path is
+  forge reachable for the whole install — and `blast run` warns when that path is
   taken. Removing the grant without adding a parser does not close the gap, it
   only breaks every project with a git dependency, which is what it did briefly
   for pypi and cargo before the compatibility check caught it.
@@ -383,8 +383,8 @@ to read it and not find a gap that was left undisclosed.
   `TestResolutionOrder::test_a_denied_host_is_never_resolved` and reproduced end
   to end by `dns-tunnelled-exfiltration`.
 - **Compromised base image or package manager.** If the sandbox interior is
-  already hostile, bulkhead enforces nothing useful.
-- **Post-install runtime.** Bulkhead protects the install. It does not protect the
+  already hostile, blastgate enforces nothing useful.
+- **Post-install runtime.** Blastgate protects the install. It does not protect the
   application when it later runs.
 - **Anything outside an install.** A malicious package that does nothing at
   install time and attacks in production is entirely out of scope.
@@ -418,7 +418,7 @@ and they are not nothing.
   refuses the run rather than being skipped, but the parser itself runs on the
   host.
 - **ssh-form dependencies are fetched over https.** npm writes ssh URLs into
-  lockfiles routinely. Bulkhead rewrites them to https to fetch, because it has
+  lockfiles routinely. Blastgate rewrites them to https to fetch, because it has
   no key to authenticate with and https is the transport the proxy can enforce.
   A genuinely private repository therefore fails rather than being fetched.
 - **Projects with git dependencies get a git binary in the install image.** A
@@ -426,16 +426,16 @@ and they are not nothing.
 
 ### 8.2 Limits of the policy engine as written
 
-- **The policy engine still ignores ports.** `bh check npm registry.npmjs.org:8443`
+- **The policy engine still ignores ports.** `blast check npm registry.npmjs.org:8443`
   reports ALLOW, because normalization strips the port and the decision is made
   on hostname alone. The restriction to port 443 lives in the proxy, not in
-  policy, so the two disagree when inspected separately. Treat `bh check` as
+  policy, so the two disagree when inspected separately. Treat `blast check` as
   answering "is this host allowed", never "is this destination reachable".
 - **The project must live somewhere the runtime can see.** On macOS the
   container runtime runs inside a VM that shares only part of the host
   filesystem. A project outside a shared path cannot be mounted and the run
   fails. This is a usability constraint rather than a weakness, but it means the
-  set of directories bulkhead can protect is smaller than "any directory".
+  set of directories blastgate can protect is smaller than "any directory".
 - **Refusing plain HTTP may break real installs.** The proxy accepts only
   CONNECT. A package manager or mirror that falls back to unencrypted HTTP will
   fail rather than be forwarded. This is fail-closed and deliberate, and it is a
@@ -448,14 +448,14 @@ and they are not nothing.
   payload are invisible.
 - **The false-positive budget is verified against a small sample.**
   `scripts/compat_check.py` installs each project twice, with and without
-  bulkhead, across npm, pypi and cargo, and currently finds no false positives.
+  blastgate, across npm, pypi and cargo, and currently finds no false positives.
   Read that as "none found", not as a rate. Both runs are retried the same
   number of times, because an unretried control silently excludes a project on a
   transient failure and makes the number look better by measuring less.
 - **Compatibility currently depends on an ecosystem convention that could
   change.** The two hardest cases in that check, esbuild and sharp, were chosen
   because they historically downloaded binaries from GitHub releases during
-  postinstall — traffic bulkhead denies. Both now ship platform binaries as npm
+  postinstall — traffic blastgate denies. Both now ship platform binaries as npm
   optional dependencies served from the registry, so they pass for reasons that
   have nothing to do with this design. If packages move back toward fetching
   binaries from arbitrary hosts at install time, the false-positive rate rises
@@ -490,7 +490,7 @@ and they are not nothing.
   both stores forges both, asserted in
   `test_replacement_is_NOT_detected_if_both_stores_are_rewritten`. Closing this
   needs an anchor this machine cannot alter — an external service, a key held in
-  an OS keychain, or an offline record — none of which bulkhead has.
+  an OS keychain, or an offline record — none of which blastgate has.
 - **The environment filter is blind to values.** It decides by variable *name*
   only. A secret stored under a name like `BUILD_NUMBER` is not recognised as a
   secret, and would be forwarded if the user asked for it by name. Shape
@@ -507,13 +507,13 @@ and they are not nothing.
 
 ### 8.3 Explicit non-goals
 
-- Bulkhead does not detect malicious packages, score them, or tell you whether a
+- Blastgate does not detect malicious packages, score them, or tell you whether a
   version is safe. Other tools do that well. This one assumes the answer is "no"
   and contains the consequences.
-- Bulkhead does not intercept TLS by default and will not in v0. If interception
+- Blastgate does not intercept TLS by default and will not in v0. If interception
   is ever added it will be opt-in. A tool that decrypts a developer's traffic by
   default does not deserve trust.
-- Bulkhead never falls back to unsandboxed execution. If the container runtime is
+- Blastgate never falls back to unsandboxed execution. If the container runtime is
   unavailable, if the network is not actually internal, or if the sidecar does
   not come up, it fails closed
   and refuses to run. This is enforced in code and tested, not merely intended.
@@ -532,7 +532,7 @@ execution can still:
   script — and attack later, outside the sandbox;
 - attempt a container escape.
 
-Bulkhead's claim at v1 is narrow and should be stated narrowly: **an install-time
+Blastgate's claim at v1 is narrow and should be stated narrowly: **an install-time
 payload cannot read host credentials it was never given, and cannot reach a
 network destination that is not on a short reviewed list.** Everything above
 remains true at the same time.
@@ -541,7 +541,7 @@ remains true at the same time.
 
 - A protection claim without a passing test that fails when the control is removed
   must be moved to section 8.
-- Any change to `bulkhead/` that alters what the tool protects against updates this
+- Any change to `blastgate/` that alters what the tool protects against updates this
   file in the same commit, or the change is refused.
 - If a gap in section 8 is closed, it moves to section 6 with its test, and the
   README's status language is re-checked in the same commit.

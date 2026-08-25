@@ -16,4 +16,4 @@ note: >
   An attacker with write access to both stores rebuilds both and the result
   verifies. Closing this needs an anchor this machine cannot alter - an
   external service, a key held in an OS keychain, or an offline record - none
-  of which bulkhead has. Counted as a failure because it is one.
+  of which blastgate has. Counted as a failure because it is one.

@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from bulkhead.audit import (
+from blastgate.audit import (
     GENESIS_HASH,
     AuditEntry,
     AuditLog,
@@ -152,7 +152,7 @@ class TestDisclosedLimits:
         # Was a disclosed limit in threat model 8.2. Closed by the anchor
         # store, which is written by the host runner rather than by the process
         # that writes the log.
-        from bulkhead.audit import AnchorStore
+        from blastgate.audit import AnchorStore
 
         store = AnchorStore(tmp_path / "anchors")
         anchor = store.append("run-1", populated.path, populated.read_all())
@@ -173,7 +173,7 @@ class TestDisclosedLimits:
     def test_replacement_is_caught_by_an_anchor_the_attacker_did_not_rewrite(
         self, populated, tmp_path
     ):
-        from bulkhead.audit import AnchorStore
+        from blastgate.audit import AnchorStore
 
         store = AnchorStore(tmp_path / "anchors")
         anchor = store.append("run-1", populated.path, populated.read_all())
@@ -194,7 +194,7 @@ class TestDisclosedLimits:
         # file to writing two consistently. It is not provenance: an attacker
         # with write access to both stores forges both. Closing this needs an
         # anchor this machine cannot alter. See docs/threat-model.md 8.2.
-        from bulkhead.audit import AnchorStore
+        from blastgate.audit import AnchorStore
 
         forged = AuditLog(populated.path.parent / "forged.log")
         for host in ("registry.npmjs.org",) * 4:
@@ -218,7 +218,7 @@ class TestVerifyContract:
             populated.verify()
 
     def test_no_request_contents_are_recorded(self, populated):
-        # Bulkhead does not intercept TLS and has no contents to record. The
+        # Blastgate does not intercept TLS and has no contents to record. The
         # log must not become a place data accumulates.
         for entry in populated.read_all():
             assert set(entry.payload()) == {
@@ -232,7 +232,7 @@ class TestCliAudit:
         # An internally consistent chain says nothing about entries removed
         # from the end. Reporting that identically to a verified log would hide
         # exactly the limit anchoring exists to close.
-        from bulkhead.cli import main as cli_main
+        from blastgate.cli import main as cli_main
         assert cli_main(["audit", str(populated.path), "--no-anchor"]) == 0
         out = capsys.readouterr().out
         assert "UNANCHORED" in out
@@ -241,14 +241,14 @@ class TestCliAudit:
         assert "exfil.attacker.test" in out
 
     def test_require_anchor_fails_when_there_is_none(self, populated, capsys):
-        from bulkhead.cli import main as cli_main
+        from blastgate.cli import main as cli_main
         assert cli_main(
             ["audit", str(populated.path), "--no-anchor", "--require-anchor"]
         ) == 1
 
     def test_an_anchored_log_reports_as_verified(self, populated, tmp_path, capsys):
-        from bulkhead.audit import AnchorStore
-        from bulkhead.cli import main as cli_main
+        from blastgate.audit import AnchorStore
+        from blastgate.cli import main as cli_main
 
         store = AnchorStore(tmp_path / "anchors")
         store.append("run-1", populated.path, populated.read_all())
@@ -259,8 +259,8 @@ class TestCliAudit:
         assert "OK: chain verified against anchor" in out
 
     def test_truncating_an_anchored_log_is_caught_by_the_cli(self, populated, tmp_path, capsys):
-        from bulkhead.audit import AnchorStore
-        from bulkhead.cli import main as cli_main
+        from blastgate.audit import AnchorStore
+        from blastgate.cli import main as cli_main
 
         store = AnchorStore(tmp_path / "anchors")
         store.append("run-1", populated.path, populated.read_all())
@@ -272,7 +272,7 @@ class TestCliAudit:
         assert "TAMPERED" in capsys.readouterr().err
 
     def test_audit_reports_tampering_loudly(self, populated, capsys):
-        from bulkhead.cli import main as cli_main
+        from blastgate.cli import main as cli_main
         entries = raw(populated)
         entries[3]["allowed"] = True
         rewrite(populated, entries)
@@ -280,14 +280,14 @@ class TestCliAudit:
         assert "TAMPERED" in capsys.readouterr().err
 
     def test_audit_verify_only_prints_no_entries(self, populated, capsys):
-        from bulkhead.cli import main as cli_main
+        from blastgate.cli import main as cli_main
         assert cli_main(["audit", str(populated.path), "--verify-only", "--no-anchor"]) == 0
         out = capsys.readouterr().out
         assert "UNANCHORED" in out
         assert "npmjs.org" not in out
 
     def test_audit_of_missing_log_is_an_empty_verified_chain(self, tmp_path, capsys):
-        from bulkhead.cli import main as cli_main
+        from blastgate.cli import main as cli_main
         assert cli_main(["audit", str(tmp_path / "nope.log"), "--no-anchor"]) == 0
         assert "0 entries" in capsys.readouterr().out
 
@@ -296,7 +296,7 @@ class TestAnchorStore:
     """The anchor chain, which is what makes a missing run visible."""
 
     def test_anchors_chain_across_runs(self, tmp_path):
-        from bulkhead.audit import AnchorStore
+        from blastgate.audit import AnchorStore
 
         log = AuditLog(tmp_path / "audit.log")
         store = AnchorStore(tmp_path / "anchors")
@@ -312,7 +312,7 @@ class TestAnchorStore:
         # Truncating the audit log is one attack; removing the anchor that
         # would reveal it is the follow-up. The anchors are chained for that
         # reason.
-        from bulkhead.audit import AnchorStore
+        from blastgate.audit import AnchorStore
 
         log = AuditLog(tmp_path / "audit.log")
         store = AnchorStore(tmp_path / "anchors")
@@ -327,7 +327,7 @@ class TestAnchorStore:
             store.verify()
 
     def test_altering_an_anchor_is_detected(self, tmp_path):
-        from bulkhead.audit import AnchorStore
+        from blastgate.audit import AnchorStore
 
         log = AuditLog(tmp_path / "audit.log")
         log.append("npm", "a.test", False, None, "denied")
@@ -344,7 +344,7 @@ class TestAnchorStore:
     def test_extending_a_broken_anchor_chain_is_refused(self, tmp_path):
         # Same rule as the audit log: appending to a broken chain would launder
         # it into a valid-looking one.
-        from bulkhead.audit import AnchorStore
+        from blastgate.audit import AnchorStore
 
         log = AuditLog(tmp_path / "audit.log")
         store = AnchorStore(tmp_path / "anchors")
@@ -358,7 +358,7 @@ class TestAnchorStore:
             store.append("run-2", log.path, log.read_all())
 
     def test_latest_for_selects_the_right_log(self, tmp_path):
-        from bulkhead.audit import AnchorStore
+        from blastgate.audit import AnchorStore
 
         one = AuditLog(tmp_path / "one.log")
         two = AuditLog(tmp_path / "two.log")
@@ -372,7 +372,7 @@ class TestAnchorStore:
         assert store.latest_for(tmp_path / "absent.log") is None
 
     def test_an_empty_log_anchors_cleanly(self, tmp_path):
-        from bulkhead.audit import GENESIS_HASH, AnchorStore
+        from blastgate.audit import GENESIS_HASH, AnchorStore
 
         log = AuditLog(tmp_path / "audit.log")
         store = AnchorStore(tmp_path / "anchors")
@@ -385,7 +385,7 @@ class TestAnchorStore:
         # Entries are appended during a run; the anchor is written when the run
         # ends. A log ahead of its last anchor is the normal in-progress state,
         # not tampering.
-        from bulkhead.audit import AnchorStore
+        from blastgate.audit import AnchorStore
 
         log = AuditLog(tmp_path / "audit.log")
         for host in ("a.test", "b.test"):

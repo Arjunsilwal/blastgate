@@ -9,7 +9,7 @@ campaigns, present to demonstrate the control rather than to define it.
 
 import pytest
 
-from bulkhead.runner import (
+from blastgate.runner import (
     SAFE_PASSTHROUGH,
     CredentialForwardError,
     EnvironmentDecision,
@@ -200,12 +200,12 @@ class TestProxyImageFreshness:
     """
 
     def test_changing_an_allowlist_changes_the_image_tag(self, tmp_path):
-        from bulkhead.runner import proxy_image_tag
+        from blastgate.runner import proxy_image_tag
 
-        (tmp_path / "bulkhead").mkdir()
+        (tmp_path / "blastgate").mkdir()
         (tmp_path / "allowlists").mkdir()
         (tmp_path / "docker").mkdir()
-        (tmp_path / "bulkhead" / "proxy.py").write_text("# code\n")
+        (tmp_path / "blastgate" / "proxy.py").write_text("# code\n")
         (tmp_path / "docker" / "proxy.Dockerfile").write_text("FROM scratch\n")
         allowlist = tmp_path / "allowlists" / "npm.yaml"
         allowlist.write_text("ecosystem: npm\nexact: []\n")
@@ -217,14 +217,14 @@ class TestProxyImageFreshness:
         assert before != after
 
     def test_changing_source_changes_the_image_tag(self, tmp_path):
-        from bulkhead.runner import proxy_image_tag
+        from blastgate.runner import proxy_image_tag
 
-        (tmp_path / "bulkhead").mkdir()
+        (tmp_path / "blastgate").mkdir()
         (tmp_path / "allowlists").mkdir()
         (tmp_path / "docker").mkdir()
         (tmp_path / "allowlists" / "npm.yaml").write_text("ecosystem: npm\n")
         (tmp_path / "docker" / "proxy.Dockerfile").write_text("FROM scratch\n")
-        source = tmp_path / "bulkhead" / "proxy.py"
+        source = tmp_path / "blastgate" / "proxy.py"
         source.write_text("# original\n")
 
         before = proxy_image_tag(tmp_path)
@@ -232,13 +232,13 @@ class TestProxyImageFreshness:
         assert proxy_image_tag(tmp_path) != before
 
     def test_the_tag_is_stable_when_nothing_changes(self, tmp_path):
-        from bulkhead.runner import proxy_image_tag
+        from blastgate.runner import proxy_image_tag
 
-        (tmp_path / "bulkhead").mkdir()
+        (tmp_path / "blastgate").mkdir()
         (tmp_path / "allowlists").mkdir()
         (tmp_path / "docker").mkdir()
         (tmp_path / "allowlists" / "npm.yaml").write_text("ecosystem: npm\n")
         (tmp_path / "docker" / "proxy.Dockerfile").write_text("FROM scratch\n")
-        (tmp_path / "bulkhead" / "proxy.py").write_text("# code\n")
+        (tmp_path / "blastgate" / "proxy.py").write_text("# code\n")
 
         assert proxy_image_tag(tmp_path) == proxy_image_tag(tmp_path)

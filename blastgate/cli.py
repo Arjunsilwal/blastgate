@@ -1,4 +1,4 @@
-"""Bulkhead CLI interface.
+"""Blastgate CLI interface.
 
 Four subcommands. 'check' evaluates a host against a policy without running
 anything. 'run' performs an install inside the sandbox. 'audit' reviews and
@@ -16,17 +16,17 @@ from pathlib import Path
 import sys
 from typing import List, Optional
 
-from bulkhead import BulkheadError
-from bulkhead.audit import (
+from blastgate import BlastgateError
+from blastgate.audit import (
     AnchorStore,
     AuditError,
     AuditLog,
     TamperError,
     format_entry_count,
 )
-from bulkhead.policy import PolicyError, load_policy
-from bulkhead.proxy import run_proxy_server
-from bulkhead.runner import (
+from blastgate.policy import PolicyError, load_policy
+from blastgate.proxy import run_proxy_server
+from blastgate.runner import (
     RunnerError,
     anchor_path_for_audit,
     default_audit_path,
@@ -36,8 +36,8 @@ from bulkhead.runner import (
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="bh",
-        description="Bulkhead: Package install egress control and isolation",
+        prog="blast",
+        description="Blastgate: Package install egress control and isolation",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -80,8 +80,8 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="*",
         metavar="COMMAND",
         help="Install command to run inside the sandbox, after a '--' separator "
-             "(e.g. bh run npm -- npm ci). REMAINDER is deliberately not used "
-             "here: it silently swallows bulkhead's own options into the "
+             "(e.g. blast run npm -- npm ci). REMAINDER is deliberately not used "
+             "here: it silently swallows blastgate's own options into the "
              "command, so --project and --audit would be ignored rather than "
              "rejected.",
     )
@@ -100,7 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--audit",
         type=Path,
         default=None,
-        help="Where to write the audit log (default: .bulkhead/audit.log)",
+        help="Where to write the audit log (default: .blastgate/audit.log)",
     )
     run_parser.add_argument(
         "--allow",
@@ -173,7 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 REFUSAL = (
-    "bh: refusing to run. Isolation and egress enforcement are not implemented "
+    "blast: refusing to run. Isolation and egress enforcement are not implemented "
     "(Phase 2 and 3).\n"
     "    Running an install without an enforcement point would provide no "
     "protection.\n"
@@ -182,7 +182,7 @@ REFUSAL = (
 
 
 def split_on_separator(args: List[str]) -> "tuple[List[str], List[str]]":
-    """Split bulkhead's own arguments from the command to run in the sandbox.
+    """Split blastgate's own arguments from the command to run in the sandbox.
 
     Done before argparse rather than with argparse.REMAINDER. REMAINDER would
     swallow --project and --audit into the install command, silently ignoring
@@ -228,9 +228,9 @@ def main(args: Optional[List[str]] = None) -> int:
         command = sandbox_command or list(parsed_args.argv)
         if not command:
             sys.stderr.write(
-                "bh: no install command given.\n"
+                "blast: no install command given.\n"
                 "    Put the command after a '--' separator, for example:\n"
-                "      bh run npm -- npm ci\n"
+                "      blast run npm -- npm ci\n"
             )
             return 2
 
@@ -256,19 +256,19 @@ def main(args: Optional[List[str]] = None) -> int:
                 audit_path=audit_path,
                 enabled_conditions=set(parsed_args.allowed_conditions),
             )
-        except BulkheadError as e:
+        except BlastgateError as e:
             # Every failure here is a refusal to run unprotected. Catching the
             # base class rather than RunnerError is deliberate: resolution
             # failures are refusals too, and one falling through as a traceback
             # would look like a crash rather than a decision.
-            sys.stderr.write(f"bh: refusing to run. {e}\n")
+            sys.stderr.write(f"blast: refusing to run. {e}\n")
             return 2
 
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
         sys.stdout.write(
             f"\nbh: egress decisions recorded in {audit_path}\n"
-            f"    review with: bh audit {audit_path}\n"
+            f"    review with: blast audit {audit_path}\n"
         )
         return result.exit_code
 

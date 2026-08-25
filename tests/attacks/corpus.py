@@ -1,6 +1,6 @@
 """Loader for the executable attack corpus.
 
-Test infrastructure, deliberately not a sixth module under bulkhead/. Nothing
+Test infrastructure, deliberately not a sixth module under blastgate/. Nothing
 here is part of the tool; it exists to run scenarios against the tool and count
 the results honestly.
 

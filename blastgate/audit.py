@@ -27,7 +27,7 @@ Wholesale replacement remains open and remains disclosed. Anchoring raises the
 bar from "write one file" to "write two files consistently in two locations",
 which is a real improvement and is not provenance. An attacker with write access
 to both stores can forge both. Genuine provenance needs an anchor this machine
-cannot alter, which bulkhead does not have. See docs/threat-model.md section 8.2.
+cannot alter, which blastgate does not have. See docs/threat-model.md section 8.2.
 """
 
 from dataclasses import asdict, dataclass
@@ -62,7 +62,7 @@ class AuditEntry:
     """One egress decision.
 
     Records the destination hostname and the rule that decided it. It does not
-    record request contents, because bulkhead does not intercept TLS and has
+    record request contents, because blastgate does not intercept TLS and has
     none to record.
     """
     seq: int

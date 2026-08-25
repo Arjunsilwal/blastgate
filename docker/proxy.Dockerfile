@@ -8,7 +8,7 @@ FROM python:3.12-alpine
 RUN pip install --no-cache-dir pyyaml==6.0.2
 
 WORKDIR /app
-COPY bulkhead /app/bulkhead
+COPY blastgate /app/blastgate
 COPY allowlists /app/allowlists
 
 ENV PYTHONPATH=/app
@@ -16,4 +16,4 @@ ENV PYTHONUNBUFFERED=1
 
 # No shell entrypoint and no install tooling. The proxy is the only process
 # this image is built to run.
-ENTRYPOINT ["python", "-m", "bulkhead.cli"]
+ENTRYPOINT ["python", "-m", "blastgate.cli"]

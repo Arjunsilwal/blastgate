@@ -6,14 +6,14 @@ resolution cannot handle common real projects without frequent false positives,
 stop. A tool that breaks legitimate installs is uninstalled within the hour.
 
 Every project is installed twice. Once in a plain container with full network
-access, which is the control, and once under bulkhead. Without the control a
+access, which is the control, and once under blastgate. Without the control a
 failure means nothing: the project might simply be broken, or the network flaky,
-and counting that against bulkhead would flatter it by hiding real breakage in
+and counting that against blastgate would flatter it by hiding real breakage in
 noise, or damn it for someone else's bug.
 
-    control ok, bulkhead ok    -> compatible
-    control ok, bulkhead fail  -> FALSE POSITIVE, the number that matters
-    control fail               -> excluded, not bulkhead's failure to own
+    control ok, blastgate ok    -> compatible
+    control ok, blastgate fail  -> FALSE POSITIVE, the number that matters
+    control fail               -> excluded, not blastgate's failure to own
 
 Denied hosts are reported for every run, because which host broke an install is
 the thing that tells you whether the allowlist is wrong or the design is.
@@ -36,10 +36,10 @@ from typing import Dict, List, Optional
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from bulkhead.audit import AuditLog  # noqa: E402
-from bulkhead.policy import load_policy  # noqa: E402
-from bulkhead.resolve import parse_git_dependencies  # noqa: E402
-from bulkhead.runner import (  # noqa: E402
+from blastgate.audit import AuditLog  # noqa: E402
+from blastgate.policy import load_policy  # noqa: E402
+from blastgate.resolve import parse_git_dependencies  # noqa: E402
+from blastgate.runner import (  # noqa: E402
     default_anchor_path,
     default_audit_path,
     detect_runtime,
@@ -49,7 +49,7 @@ from bulkhead.runner import (  # noqa: E402
 
 NPM_IMAGE = "node:20-alpine"
 
-# One entry per ecosystem: the image bulkhead would pick, and the command that
+# One entry per ecosystem: the image blastgate would pick, and the command that
 # means "fetch this project's dependencies". For cargo that is `fetch` rather
 # than `build`: compiling is not what egress policy governs, and building would
 # measure the compiler instead.
@@ -165,9 +165,9 @@ class Result:
     control_ok: bool = False
     control_detail: str = ""
     control_attempts: int = 1
-    bulkhead_ok: bool = False
-    bulkhead_detail: str = ""
-    bulkhead_attempts: int = 1
+    blastgate_ok: bool = False
+    blastgate_detail: str = ""
+    blastgate_attempts: int = 1
     denied_hosts: List[str] = field(default_factory=list)
     commit: str = ""
     seconds: float = 0.0
@@ -176,7 +176,7 @@ class Result:
     def verdict(self) -> str:
         if not self.control_ok:
             return "excluded"
-        return "compatible" if self.bulkhead_ok else "FALSE POSITIVE"
+        return "compatible" if self.blastgate_ok else "FALSE POSITIVE"
 
 
 def _run(argv, timeout):
@@ -215,7 +215,7 @@ def prepare(case: Case, workdir: Path) -> tuple:
 
 
 def image_for(project: Path, runtime: str, ecosystem: str = "npm") -> str:
-    """The image bulkhead would choose, used for the control too.
+    """The image blastgate would choose, used for the control too.
 
     The control has to differ from the test in exactly one variable: whether
     egress is restricted. An earlier version ran the control in plain
@@ -272,7 +272,7 @@ def control_install(project: Path, runtime: str, image: str, command: List[str],
     testing fewer things. Observed: `got` excluded itself on one run and
     installed fine on the next two.
 
-    The bulkhead run is retried the same number of times, so neither side gets
+    The blastgate run is retried the same number of times, so neither side gets
     an advantage, and the attempt count is reported either way.
     """
     argv = [
@@ -298,7 +298,7 @@ def control_install(project: Path, runtime: str, image: str, command: List[str],
     return False, detail, ATTEMPTS
 
 
-def bulkhead_install(project: Path, ecosystem: str = "npm", timeout: int = 900):
+def blastgate_install(project: Path, ecosystem: str = "npm", timeout: int = 900):
     audit = default_audit_path(project)
     anchors = default_anchor_path(project)
     for artefact in (audit, anchors):
@@ -341,7 +341,7 @@ def bulkhead_install(project: Path, ecosystem: str = "npm", timeout: int = 900):
 def run_case(case: Case, runtime: str) -> Result:
     result = Result(case=case)
     started = time.time()
-    workdir = Path(tempfile.mkdtemp(dir=Path.home() / ".bulkhead-tests"))
+    workdir = Path(tempfile.mkdtemp(dir=Path.home() / ".blastgate-tests"))
     try:
         source, commit = prepare(case, workdir)
         if source is None:
@@ -360,10 +360,10 @@ def run_case(case: Case, runtime: str) -> Result:
         if not result.control_ok:
             return result
 
-        test_dir = workdir / "bulkhead"
+        test_dir = workdir / "blastgate"
         shutil.copytree(source, test_dir)
-        (result.bulkhead_ok, result.bulkhead_detail, result.denied_hosts,
-         result.bulkhead_attempts) = bulkhead_install(test_dir, case.ecosystem)
+        (result.blastgate_ok, result.blastgate_detail, result.denied_hosts,
+         result.blastgate_attempts) = blastgate_install(test_dir, case.ecosystem)
         return result
     finally:
         result.seconds = time.time() - started
@@ -372,13 +372,13 @@ def run_case(case: Case, runtime: str) -> Result:
 
 def render(results: List[Result]) -> str:
     considered = [r for r in results if r.control_ok]
-    failures = [r for r in considered if not r.bulkhead_ok]
+    failures = [r for r in considered if not r.blastgate_ok]
     excluded = [r for r in results if not r.control_ok]
 
     rate = (len(failures) / len(considered) * 100) if considered else 0.0
     lines = [
         f"**{len(considered) - len(failures)} of {len(considered)} real projects "
-        f"install unchanged under bulkhead. False positive rate: {rate:.0f}%.**",
+        f"install unchanged under blastgate. False positive rate: {rate:.0f}%.**",
         "",
         "| Project | Ecosystem | Why it is here | Verdict | Denied hosts |",
         "| --- | --- | --- | --- | --- |",
@@ -386,22 +386,22 @@ def render(results: List[Result]) -> str:
     for r in results:
         hosts = ", ".join(f"`{h}`" for h in r.denied_hosts[:4]) or "—"
         retried = ""
-        if max(r.control_attempts, r.bulkhead_attempts) > 1:
+        if max(r.control_attempts, r.blastgate_attempts) > 1:
             retried = (f" (retried: control {r.control_attempts}x, "
-                       f"bulkhead {r.bulkhead_attempts}x)")
+                       f"blastgate {r.blastgate_attempts}x)")
         lines.append(
             f"| `{r.case.name}` | {r.case.ecosystem} | {r.case.why} | "
             f"{r.verdict}{retried} | {hosts} |"
         )
     if excluded:
         lines += ["", "Excluded because the control install also failed, so the"
-                  " failure is not bulkhead's:"]
+                  " failure is not blastgate's:"]
         for r in excluded:
             lines.append(f"- `{r.case.name}`: {r.control_detail}")
     if failures:
         lines += ["", "False positives, in full:"]
         for r in failures:
-            lines.append(f"- `{r.case.name}`: {r.bulkhead_detail}")
+            lines.append(f"- `{r.case.name}`: {r.blastgate_detail}")
     return "\n".join(lines)
 
 
@@ -412,7 +412,7 @@ def main() -> int:
     args = parser.parse_args()
 
     runtime = detect_runtime()
-    (Path.home() / ".bulkhead-tests").mkdir(parents=True, exist_ok=True)
+    (Path.home() / ".blastgate-tests").mkdir(parents=True, exist_ok=True)
     cases = [c for c in CASES if not args.only or c.name in args.only]
 
     results = []

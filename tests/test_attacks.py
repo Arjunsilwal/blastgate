@@ -33,7 +33,7 @@ from attacks.executor import (
 )
 
 try:
-    from bulkhead.runner import detect_runtime
+    from blastgate.runner import detect_runtime
     RUNTIME = detect_runtime()
 except Exception:
     RUNTIME = None

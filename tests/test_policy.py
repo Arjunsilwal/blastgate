@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 import pytest
 
-from bulkhead.policy import (
+from blastgate.policy import (
     Policy,
     PolicyDecision,
     PolicyError,
@@ -12,7 +12,7 @@ from bulkhead.policy import (
     ConditionalRule,
     load_policy,
 )
-from bulkhead.cli import main as cli_main
+from blastgate.cli import main as cli_main
 
 
 @pytest.fixture
@@ -387,7 +387,7 @@ class TestCliCheck:
 
 
 class TestCliRun:
-    """`bh run` must never fall back to an unsandboxed install.
+    """`blast run` must never fall back to an unsandboxed install.
 
     It now has a real execution path, so the question is no longer "does it
     refuse" but "does it refuse on every path where the enforcement point is
@@ -401,7 +401,7 @@ class TestCliRun:
         import subprocess
 
         def forbidden(*args, **kwargs):
-            raise AssertionError("bh run attempted to execute a command")
+            raise AssertionError("blast run attempted to execute a command")
 
         for target, name in (
             (subprocess, "run"),
@@ -420,7 +420,7 @@ class TestCliRun:
     def test_run_refuses_with_no_install_arguments(self, no_execution_allowed):
         assert cli_main(["run", "npm"]) == 2
 
-    def test_bulkhead_options_are_not_swallowed_into_the_command(self, no_execution_allowed, tmp_path, capsys):
+    def test_blastgate_options_are_not_swallowed_into_the_command(self, no_execution_allowed, tmp_path, capsys):
         # argparse.REMAINDER would absorb --audit into the install command, so
         # the flag would be silently ignored instead of honoured. Here it is
         # parsed, the guard sees the bad path, and the run is refused.
@@ -431,9 +431,9 @@ class TestCliRun:
         assert "payload could rewrite it" in capsys.readouterr().err
 
     def test_run_refuses_when_no_runtime_is_available(self, no_execution_allowed, monkeypatch, capsys):
-        # The original reason bh run refused. A missing runtime must still be a
+        # The original reason blast run refused. A missing runtime must still be a
         # refusal and never a local install.
-        monkeypatch.setattr("bulkhead.runner.shutil.which", lambda name: None)
+        monkeypatch.setattr("blastgate.runner.shutil.which", lambda name: None)
         exit_code = cli_main(["run", "npm", "--", "npm", "ci"])
         assert exit_code == 2
         assert "refusing to run" in capsys.readouterr().err
@@ -455,7 +455,7 @@ class TestCliRun:
         assert cli_main(["run", "nosuchecosystem", "--", "npm", "ci"]) == 2
 
     def test_default_audit_path_is_outside_the_project(self, tmp_path):
-        from bulkhead.runner import assert_audit_log_unreachable, default_audit_path
+        from blastgate.runner import assert_audit_log_unreachable, default_audit_path
 
         # The default must satisfy the guard rather than trip it.
         assert_audit_log_unreachable(default_audit_path(tmp_path), tmp_path)

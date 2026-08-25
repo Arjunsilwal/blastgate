@@ -45,9 +45,9 @@ import time
 import uuid
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
-from bulkhead import BulkheadError
-from bulkhead.audit import AnchorStore, AuditLog
-from bulkhead.resolve import (
+from blastgate import BlastgateError
+from blastgate.audit import AnchorStore, AuditLog
+from blastgate.resolve import (
     CACHE_MOUNT,
     GIT_CACHE_DIR,
     GIT_IMAGE,
@@ -64,14 +64,14 @@ from bulkhead.resolve import (
 )
 
 
-class RunnerError(BulkheadError):
+class RunnerError(BlastgateError):
     """Base error for sandbox construction failures."""
 
 
 class RuntimeUnavailableError(RunnerError):
     """Raised when no container runtime is available.
 
-    Bulkhead never falls back to unsandboxed execution. An absent runtime is a
+    Blastgate never falls back to unsandboxed execution. An absent runtime is a
     refusal, not a degraded mode.
     """
 
@@ -91,7 +91,7 @@ class CredentialForwardError(RunnerError):
 # Deliberately absent:
 #   HOME, USER, PWD  - host paths and identities that do not exist in the
 #                      sandbox; the container supplies its own.
-#   HTTP_PROXY et al - set by bulkhead to point at the enforcement point.
+#   HTTP_PROXY et al - set by blastgate to point at the enforcement point.
 #                      Inheriting the host's value would be a bypass.
 #   npm_config_*,    - can redirect the registry itself, which is the one
 #   PIP_INDEX_URL      thing an allowlist exists to pin down.
@@ -274,7 +274,7 @@ def detect_runtime(candidates: Sequence[str] = ("docker", "podman")) -> str:
     raise RuntimeUnavailableError(
         "no container runtime found (looked for: "
         + ", ".join(candidates)
-        + "). Bulkhead will not run an install outside a sandbox."
+        + "). Blastgate will not run an install outside a sandbox."
     )
 
 
@@ -287,8 +287,8 @@ def detect_runtime(candidates: Sequence[str] = ("docker", "podman")) -> str:
 # preference: a payload cannot opt out of policy because there is nothing to
 # opt out to.
 
-INTERNAL_NETWORK = "bulkhead-internal"
-EXTERNAL_NETWORK = "bulkhead-external"
+INTERNAL_NETWORK = "blastgate-internal"
+EXTERNAL_NETWORK = "blastgate-external"
 
 SANDBOX_WORKDIR = "/workspace"
 
@@ -433,8 +433,8 @@ def run_sandboxed(
 # makes it the only route out for the install. The install container reaches it
 # by name over the internal network and cannot reach anything else.
 
-PROXY_IMAGE_REPO = "bulkhead-proxy"
-PROXY_ALIAS = "bulkhead-proxy"
+PROXY_IMAGE_REPO = "blastgate-proxy"
+PROXY_ALIAS = "blastgate-proxy"
 PROXY_PORT = 3128
 
 DEFAULT_IMAGES = {
@@ -444,7 +444,7 @@ DEFAULT_IMAGES = {
 }
 
 
-GIT_IMAGE_REPO_PREFIX = "bulkhead"
+GIT_IMAGE_REPO_PREFIX = "blastgate"
 
 
 def default_image_for(ecosystem: str) -> str:
@@ -522,17 +522,17 @@ def default_anchor_path(project_dir: Path) -> Path:
     """
     project_dir = Path(project_dir).resolve()
     digest = hashlib.sha256(str(project_dir).encode("utf-8")).hexdigest()[:12]
-    return Path.home() / ".bulkhead" / "anchors" / f"{project_dir.name}-{digest}.anchors"
+    return Path.home() / ".blastgate" / "anchors" / f"{project_dir.name}-{digest}.anchors"
 
 
 def anchor_path_for_audit(audit_path: Path) -> Path:
     """The anchor store that corresponds to an audit log by convention.
 
     Both defaults are keyed by the same project digest, so the log's filename
-    determines its anchor's filename. Used by `bh audit` to find an anchor
+    determines its anchor's filename. Used by `blast audit` to find an anchor
     without being told where it is.
     """
-    return Path.home() / ".bulkhead" / "anchors" / (Path(audit_path).stem + ".anchors")
+    return Path.home() / ".blastgate" / "anchors" / (Path(audit_path).stem + ".anchors")
 
 
 def assert_anchor_store_unreachable(
@@ -569,7 +569,7 @@ def default_audit_path(project_dir: Path) -> Path:
     """A per-project log outside the project, so the sandbox cannot reach it."""
     project_dir = Path(project_dir).resolve()
     digest = hashlib.sha256(str(project_dir).encode("utf-8")).hexdigest()[:12]
-    return Path.home() / ".bulkhead" / "audit" / f"{project_dir.name}-{digest}.log"
+    return Path.home() / ".blastgate" / "audit" / f"{project_dir.name}-{digest}.log"
 
 
 def _repo_root() -> Path:
@@ -588,7 +588,7 @@ def proxy_image_tag(context: Optional[Path] = None) -> str:
     context = Path(context) if context else _repo_root()
     digest = hashlib.sha256()
     sources = sorted(
-        list((context / "bulkhead").glob("*.py"))
+        list((context / "blastgate").glob("*.py"))
         + list((context / "allowlists").glob("*.yaml"))
         + [context / "docker" / "proxy.Dockerfile"]
     )
@@ -660,7 +660,7 @@ def assert_no_stale_proxy(runtime: str) -> None:
         return
     names = " ".join(existing)
     raise RunnerError(
-        f"a bulkhead proxy is already attached to {INTERNAL_NETWORK}: {names}. "
+        f"a blastgate proxy is already attached to {INTERNAL_NETWORK}: {names}. "
         f"Two sidecars share one network alias, so requests would be routed to "
         f"either one and decisions could be enforced by the wrong policy and "
         f"logged to the wrong file. If another install is running, wait for it. "
@@ -691,7 +691,7 @@ class ProxySidecar:
         self.audit_path = Path(audit_path).resolve()
         self.runtime = runtime
         self.enabled_conditions = set(enabled_conditions or ())
-        self.name = name or f"bulkhead-proxy-{uuid.uuid4().hex[:8]}"
+        self.name = name or f"blastgate-proxy-{uuid.uuid4().hex[:8]}"
         self._started = False
 
     def start(self) -> "ProxySidecar":
@@ -852,7 +852,7 @@ def run_install(
     install_conditions = install_phase_conditions(policy.ecosystem, enabled_conditions)
     if install_conditions & RESOLVE_ONLY_CONDITIONS:
         sys.stderr.write(
-            f"bh: warning: {policy.ecosystem} has no resolve phase, so code "
+            f"blast: warning: {policy.ecosystem} has no resolve phase, so code "
             f"forges stay reachable for the whole install. A payload that "
             f"reaches one can exfiltrate through it. See threat-model 8.1.\n"
         )
@@ -919,7 +919,7 @@ def resolve_git_dependencies(
     would put attacker-influenced files next to the one process in the design
     that can reach a forge.
     """
-    from bulkhead.policy import load_policy
+    from blastgate.policy import load_policy
 
     runtime = runtime or detect_runtime()
     cache_dir = Path(cache_dir).resolve()

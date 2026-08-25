@@ -15,9 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from bulkhead.audit import AuditLog
-from bulkhead.policy import load_policy
-from bulkhead.runner import (
+from blastgate.audit import AuditLog
+from blastgate.policy import load_policy
+from blastgate.runner import (
     RunnerError,
     assert_audit_log_unreachable,
     default_audit_path,
@@ -43,7 +43,7 @@ def proxy_image():
 
 @pytest.fixture
 def project():
-    base = Path.home() / ".bulkhead-tests"
+    base = Path.home() / ".blastgate-tests"
     base.mkdir(parents=True, exist_ok=True)
     path = Path(tempfile.mkdtemp(dir=base))
     try:
@@ -54,7 +54,7 @@ def project():
 
 @pytest.fixture
 def audit(project):
-    from bulkhead.runner import default_anchor_path
+    from blastgate.runner import default_anchor_path
 
     path = default_audit_path(project)
     anchors = default_anchor_path(project)
@@ -119,14 +119,14 @@ class TestTheWholeThing:
     def test_the_proxy_is_the_only_host_reachable(self, project, audit):
         script = (
             "import socket\n"
-            "for target in [('bulkhead-proxy', 3128), ('1.1.1.1', 443)]:\n"
+            "for target in [('blastgate-proxy', 3128), ('1.1.1.1', 443)]:\n"
             "    try:\n"
             "        socket.create_connection(target, timeout=5); print(target[0], 'OPEN')\n"
             "    except Exception:\n"
             "        print(target[0], 'CLOSED')\n"
         )
         result = install(["python", "-c", script], project, audit)
-        assert "bulkhead-proxy OPEN" in result.stdout
+        assert "blastgate-proxy OPEN" in result.stdout
         assert "1.1.1.1 CLOSED" in result.stdout
 
 
@@ -161,7 +161,7 @@ class TestTheAuditLog:
         # The project is mounted writable into the sandbox, so this would be a
         # log the payload could rewrite.
         with pytest.raises(RunnerError, match="payload could rewrite"):
-            install(["true"], project, project / ".bulkhead" / "audit.log")
+            install(["true"], project, project / ".blastgate" / "audit.log")
 
 
 class TestARealInstall:
@@ -191,8 +191,8 @@ class TestAnchoring:
     """
 
     def test_a_run_writes_an_anchor(self, project, audit):
-        from bulkhead.audit import AnchorStore
-        from bulkhead.runner import default_anchor_path
+        from blastgate.audit import AnchorStore
+        from blastgate.runner import default_anchor_path
 
         anchor_path = default_anchor_path(project)
         install(["python", "-c", reach("registry.npmjs.org")], project, audit)
@@ -204,8 +204,8 @@ class TestAnchoring:
         AuditLog(audit).verify_against_anchor(anchor)
 
     def test_truncating_the_log_after_a_run_is_detected(self, project, audit):
-        from bulkhead.audit import AnchorStore, TamperError
-        from bulkhead.runner import default_anchor_path
+        from blastgate.audit import AnchorStore, TamperError
+        from blastgate.runner import default_anchor_path
 
         script = reach("registry.npmjs.org") + reach("exfil.attacker.test")
         install(["python", "-c", script], project, audit)
@@ -222,7 +222,7 @@ class TestAnchoring:
             log.verify_against_anchor(anchor)
 
     def test_the_sandbox_cannot_see_the_anchor_store(self, project, audit):
-        from bulkhead.runner import default_anchor_path
+        from blastgate.runner import default_anchor_path
 
         anchor_path = default_anchor_path(project)
         install(["python", "-c", reach("registry.npmjs.org")], project, audit)
@@ -235,7 +235,7 @@ class TestAnchoring:
     def test_an_anchor_beside_the_audit_log_is_refused(self, project, audit):
         # The audit directory is mounted into the proxy container. An anchor
         # there could be rewritten by the process that writes the log.
-        from bulkhead.runner import RunnerError
+        from blastgate.runner import RunnerError
 
         with pytest.raises(RunnerError, match="audit directory"):
             install(
@@ -249,9 +249,9 @@ def git_install():
     """One real install of a git dependency, shared by the assertions below."""
     import json as _json
 
-    from bulkhead.runner import default_anchor_path
+    from blastgate.runner import default_anchor_path
 
-    base = Path.home() / ".bulkhead-tests"
+    base = Path.home() / ".blastgate-tests"
     base.mkdir(parents=True, exist_ok=True)
     project = Path(tempfile.mkdtemp(dir=base))
     (project / "package.json").write_text(_json.dumps({
@@ -318,7 +318,7 @@ class TestTwoPhaseResolution:
     def test_the_git_cache_is_read_only_in_the_install(self, git_install):
         # A writable cache would be a channel from the install back into the
         # phase that has forge access.
-        from bulkhead.resolve import CACHE_MOUNT
+        from blastgate.resolve import CACHE_MOUNT
 
         project, audit, _ = git_install
         result = run_install(
@@ -332,7 +332,7 @@ class TestTwoPhaseResolution:
     def test_git_dependencies_without_the_flag_are_refused(self, git_install):
         # Fail closed. The alternative is an install that reaches a forge it
         # was never granted.
-        from bulkhead.resolve import UnresolvableDependencyError
+        from blastgate.resolve import UnresolvableDependencyError
 
         project, audit, _ = git_install
         with pytest.raises(UnresolvableDependencyError, match="resolve phase is not enabled"):
@@ -352,9 +352,9 @@ class TestTwoPhaseResolution:
 
 @pytest.fixture(scope="module")
 def cargo_run():
-    from bulkhead.runner import default_anchor_path
+    from blastgate.runner import default_anchor_path
 
-    base = Path.home() / ".bulkhead-tests"
+    base = Path.home() / ".blastgate-tests"
     base.mkdir(parents=True, exist_ok=True)
     project = Path(tempfile.mkdtemp(dir=base))
     (project / "src").mkdir()

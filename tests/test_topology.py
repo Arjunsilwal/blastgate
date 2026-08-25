@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from bulkhead.runner import (
+from blastgate.runner import (
     EXTERNAL_NETWORK,
     INTERNAL_NETWORK,
     RunnerError,
@@ -66,7 +66,7 @@ def project():
     # that shares only the user's home directory, so a bind mount from the
     # system temp directory fails outright. This is a real constraint on where
     # a project can live, not a test artefact - see docs/threat-model.md.
-    base = Path.home() / ".bulkhead-tests"
+    base = Path.home() / ".blastgate-tests"
     base.mkdir(parents=True, exist_ok=True)
     path = Path(tempfile.mkdtemp(dir=base))
     (path / "package.json").write_text('{"name":"demo"}\n')
@@ -185,7 +185,7 @@ class TestNetworkIntegrity:
         # A network created by hand, or by an older version, might not be
         # internal. Trusting the name would mean reporting isolation while
         # running with a route out.
-        name = "bulkhead-test-not-internal"
+        name = "blastgate-test-not-internal"
         subprocess.run([RUNTIME, "network", "create", name], capture_output=True)
         try:
             with pytest.raises(RunnerError, match="not internal"):
@@ -194,7 +194,7 @@ class TestNetworkIntegrity:
             subprocess.run([RUNTIME, "network", "rm", name], capture_output=True)
 
     def test_run_refuses_a_tampered_internal_network(self, project):
-        name = "bulkhead-test-not-internal-2"
+        name = "blastgate-test-not-internal-2"
         subprocess.run([RUNTIME, "network", "create", name], capture_output=True)
         try:
             with pytest.raises(RunnerError):
@@ -222,7 +222,7 @@ class TestStaleSidecar:
     """
 
     def test_a_stale_proxy_on_the_network_is_refused(self, project):
-        from bulkhead.runner import (
+        from blastgate.runner import (
             PROXY_IMAGE_REPO,
             ProxySidecar,
             assert_no_stale_proxy,
@@ -247,6 +247,6 @@ class TestStaleSidecar:
             subprocess.run([RUNTIME, "rm", "-f", name], capture_output=True)
 
     def test_no_stale_proxy_is_the_normal_case(self):
-        from bulkhead.runner import assert_no_stale_proxy
+        from blastgate.runner import assert_no_stale_proxy
 
         assert_no_stale_proxy(RUNTIME) is None

@@ -9,9 +9,9 @@ import asyncio
 
 import pytest
 
-from bulkhead.audit import AuditLog
-from bulkhead.policy import Policy
-from bulkhead.proxy import (
+from blastgate.audit import AuditLog
+from blastgate.policy import Policy
+from blastgate.proxy import (
     DEFAULT_ALLOWED_PORTS,
     EgressProxy,
     MalformedRequestError,
@@ -202,7 +202,7 @@ class TestEnforcement:
             assert host == "registry.npmjs.org"
             return await real_open("127.0.0.1", upstream_port)
 
-        monkeypatch.setattr("bulkhead.proxy.asyncio.open_connection", fake_open)
+        monkeypatch.setattr("blastgate.proxy.asyncio.open_connection", fake_open)
 
         log = AuditLog(tmp_path / "audit.log")
         proxy = await EgressProxy(policy, audit_log=log).start()
@@ -263,7 +263,7 @@ class TestResolutionOrder:
 
         log = AuditLog(tmp_path / "audit.log")
         proxy = await EgressProxy(policy, audit_log=log).start()
-        import bulkhead.proxy as proxy_module
+        import blastgate.proxy as proxy_module
         original = proxy_module.asyncio.open_connection
         proxy_module.asyncio.open_connection = recording_open
         try:
@@ -290,7 +290,7 @@ class TestResolutionOrder:
             return await real_open(host, port, *a, **kw)
 
         proxy = await EgressProxy(policy, audit_log=AuditLog(tmp_path / "a.log")).start()
-        import bulkhead.proxy as proxy_module
+        import blastgate.proxy as proxy_module
         original = proxy_module.asyncio.open_connection
         proxy_module.asyncio.open_connection = recording_open
         try:

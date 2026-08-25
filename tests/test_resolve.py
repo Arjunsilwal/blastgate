@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from bulkhead.resolve import (
+from blastgate.resolve import (
     CACHE_MOUNT,
     ResolveError,
     UnresolvableDependencyError,
@@ -114,7 +114,7 @@ class TestCloneScript:
     """
 
     def test_each_dependency_is_cloned_into_the_cache(self):
-        from bulkhead.resolve import clone_script
+        from blastgate.resolve import clone_script
 
         deps = [
             parse_git_spec("a", "github:o/a"),
@@ -129,17 +129,17 @@ class TestCloneScript:
     def test_the_script_stops_on_the_first_failure(self):
         # Without set -e a failed clone would be reported as success and the
         # install would go looking for the missing repository itself.
-        from bulkhead.resolve import clone_script
+        from blastgate.resolve import clone_script
 
         assert clone_script([parse_git_spec("a", "github:o/a")]).startswith("set -e")
 
     def test_success_is_signalled_explicitly(self):
-        from bulkhead.resolve import clone_script
+        from blastgate.resolve import clone_script
 
         assert clone_script([parse_git_spec("a", "github:o/a")]).rstrip().endswith("echo RESOLVE_OK")
 
     def test_an_existing_mirror_is_updated_rather_than_recloned(self):
-        from bulkhead.resolve import clone_script
+        from blastgate.resolve import clone_script
 
         script = clone_script([parse_git_spec("a", "github:o/a")])
         assert "fetch --prune" in script
@@ -149,7 +149,7 @@ class TestCloneScript:
         # The parser's charset already rejects these, so this is the second
         # layer. It is tested by constructing the dependency directly, because
         # the point is that quoting holds even if the parser one day does not.
-        from bulkhead.resolve import GitDependency, clone_script
+        from blastgate.resolve import GitDependency, clone_script
 
         hostile = GitDependency(
             name="evil", host="github.com",
@@ -161,7 +161,7 @@ class TestCloneScript:
         assert "\n  touch /tmp/pwned" not in script
 
     def test_no_dependencies_produces_a_script_that_still_succeeds(self):
-        from bulkhead.resolve import clone_script
+        from blastgate.resolve import clone_script
 
         assert clone_script([]).strip() == "set -e\necho RESOLVE_OK"
 
@@ -177,30 +177,30 @@ class TestInstallPhaseConditions:
     """
 
     def test_npm_moves_forge_access_into_the_resolve_phase(self):
-        from bulkhead.resolve import install_phase_conditions
+        from blastgate.resolve import install_phase_conditions
 
         assert install_phase_conditions("npm", {"git-dependencies"}) == set()
 
     @pytest.mark.parametrize("ecosystem", ["pypi", "cargo"])
     def test_pypi_and_cargo_also_move_forge_access_into_the_resolve_phase(self, ecosystem):
-        from bulkhead.resolve import install_phase_conditions
+        from blastgate.resolve import install_phase_conditions
 
         assert install_phase_conditions(ecosystem, {"git-dependencies"}) == set()
 
     def test_an_ecosystem_without_a_parser_keeps_the_old_grant(self):
         # Weaker, and deliberately so: removing the grant without providing the
         # phase that replaces it breaks the install instead of protecting it.
-        from bulkhead.resolve import install_phase_conditions
+        from blastgate.resolve import install_phase_conditions
 
         assert install_phase_conditions("golang", {"git-dependencies"}) == {"git-dependencies"}
 
     def test_unrelated_conditions_are_never_stripped(self):
-        from bulkhead.resolve import install_phase_conditions
+        from blastgate.resolve import install_phase_conditions
 
         assert install_phase_conditions("npm", {"something-else"}) == {"something-else"}
 
     def test_nothing_enabled_stays_nothing(self):
-        from bulkhead.resolve import install_phase_conditions
+        from blastgate.resolve import install_phase_conditions
 
         for ecosystem in ("npm", "pypi", "cargo"):
             assert install_phase_conditions(ecosystem, set()) == set()
@@ -208,7 +208,7 @@ class TestInstallPhaseConditions:
     def test_every_resolve_capable_ecosystem_can_actually_parse_manifests(self, tmp_path):
         # A name added to RESOLVE_CAPABLE_ECOSYSTEMS without a parser to match
         # would reintroduce the exact regression this class exists for.
-        from bulkhead.resolve import RESOLVE_CAPABLE_ECOSYSTEMS
+        from blastgate.resolve import RESOLVE_CAPABLE_ECOSYSTEMS
 
         assert RESOLVE_CAPABLE_ECOSYSTEMS == {"npm", "pypi", "cargo"}, (
             "adding an ecosystem here requires parse_git_dependencies to read "
@@ -226,7 +226,7 @@ class TestPipRequirements:
         ("git+ssh://git@gitlab.com/o/r.git", "gitlab.com", "o/r", None, "r"),
     ])
     def test_recognised_requirements(self, line, host, path, ref, name):
-        from bulkhead.resolve import parse_pip_requirement
+        from blastgate.resolve import parse_pip_requirement
 
         dependency = parse_pip_requirement(line)
         assert dependency is not None
@@ -238,18 +238,18 @@ class TestPipRequirements:
         "-r other-requirements.txt", "./local-package", "https://example.test/x.whl",
     ])
     def test_ordinary_requirements_are_not_git_dependencies(self, line):
-        from bulkhead.resolve import parse_pip_requirement
+        from blastgate.resolve import parse_pip_requirement
 
         assert parse_pip_requirement(line) is None
 
     def test_unencrypted_git_is_refused(self):
-        from bulkhead.resolve import parse_pip_requirement
+        from blastgate.resolve import parse_pip_requirement
 
         with pytest.raises(UnresolvableDependencyError, match="unencrypted"):
             parse_pip_requirement("git+git://github.com/o/r")
 
     def test_requirements_and_pyproject_are_both_read(self, tmp_path):
-        from bulkhead.resolve import parse_git_dependencies
+        from blastgate.resolve import parse_git_dependencies
 
         (tmp_path / "requirements.txt").write_text(
             "requests==2.32.3\ngit+https://github.com/o/from-requirements#egg=a\n"
@@ -264,7 +264,7 @@ class TestPipRequirements:
 
 class TestCargoSources:
     def test_a_git_dependency_in_the_manifest(self, tmp_path):
-        from bulkhead.resolve import parse_git_dependencies
+        from blastgate.resolve import parse_git_dependencies
 
         (tmp_path / "Cargo.toml").write_text(
             '[package]\nname = "x"\nversion = "0.1.0"\n\n[dependencies]\n'
@@ -278,14 +278,14 @@ class TestCargoSources:
     def test_the_crates_registry_is_not_a_git_dependency(self, tmp_path):
         # Cargo.lock spells the registry as a GitHub URL. Reading it as a git
         # dependency would send the resolve phase after the whole index.
-        from bulkhead.resolve import parse_cargo_source
+        from blastgate.resolve import parse_cargo_source
 
         assert parse_cargo_source(
             "serde", "registry+https://github.com/rust-lang/crates.io-index"
         ) is None
 
     def test_git_sources_come_from_the_lockfile_too(self, tmp_path):
-        from bulkhead.resolve import parse_git_dependencies
+        from blastgate.resolve import parse_git_dependencies
 
         (tmp_path / "Cargo.lock").write_text(
             '[[package]]\nname = "anyhow"\nversion = "1.0.93"\n'
@@ -298,7 +298,7 @@ class TestCargoSources:
         assert found[0].ref == "1.0.93"
 
     def test_dev_and_build_dependencies_are_read(self, tmp_path):
-        from bulkhead.resolve import parse_git_dependencies
+        from blastgate.resolve import parse_git_dependencies
 
         (tmp_path / "Cargo.toml").write_text(
             '[package]\nname = "x"\nversion = "0.1.0"\n\n[dev-dependencies]\n'
@@ -309,7 +309,7 @@ class TestCargoSources:
         assert found == {"o/dev", "o/build"}
 
     def test_an_unparseable_manifest_refuses(self, tmp_path):
-        from bulkhead.resolve import parse_git_dependencies
+        from blastgate.resolve import parse_git_dependencies
 
         (tmp_path / "Cargo.toml").write_text("[package\nthis is not toml")
         with pytest.raises(ResolveError, match="Refusing to run"):
@@ -320,14 +320,14 @@ class TestEveryCapableEcosystemHasAParser:
     def test_no_ecosystem_is_listed_without_a_parser(self, tmp_path):
         # The regression this guards was exactly this mismatch: an ecosystem
         # whose grant was removed with nothing to replace it.
-        from bulkhead.resolve import RESOLVE_CAPABLE_ECOSYSTEMS, parse_git_dependencies
+        from blastgate.resolve import RESOLVE_CAPABLE_ECOSYSTEMS, parse_git_dependencies
 
         for ecosystem in RESOLVE_CAPABLE_ECOSYSTEMS:
             assert parse_git_dependencies(tmp_path, ecosystem) == []
 
     def test_each_capable_ecosystem_has_a_resolve_allowlist(self):
-        from bulkhead.policy import load_policy
-        from bulkhead.resolve import RESOLVE_CAPABLE_ECOSYSTEMS, resolve_policy_for
+        from blastgate.policy import load_policy
+        from blastgate.resolve import RESOLVE_CAPABLE_ECOSYSTEMS, resolve_policy_for
 
         for ecosystem in RESOLVE_CAPABLE_ECOSYSTEMS:
             policy = load_policy(resolve_policy_for(ecosystem))
@@ -339,15 +339,15 @@ class TestEveryCapableEcosystemHasAParser:
     def test_a_resolve_policy_denies_its_own_registry(self, ecosystem, registry):
         # Resolution fetches git refs. Anything reaching for a package index
         # under a resolve policy is not resolution.
-        from bulkhead.policy import load_policy
-        from bulkhead.resolve import resolve_policy_for
+        from blastgate.policy import load_policy
+        from blastgate.resolve import resolve_policy_for
 
         policy = load_policy(resolve_policy_for(ecosystem))
         assert policy.evaluate(registry).allowed is False
 
     def test_each_capable_ecosystem_has_a_git_capable_image(self):
-        from bulkhead.resolve import RESOLVE_CAPABLE_ECOSYSTEMS
-        from bulkhead.runner import install_dockerfile_for
+        from blastgate.resolve import RESOLVE_CAPABLE_ECOSYSTEMS
+        from blastgate.runner import install_dockerfile_for
 
         for ecosystem in RESOLVE_CAPABLE_ECOSYSTEMS:
             assert install_dockerfile_for(ecosystem).is_file()

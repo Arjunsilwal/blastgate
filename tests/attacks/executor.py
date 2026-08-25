@@ -13,8 +13,8 @@ import shlex
 import shutil
 import tempfile
 
-from bulkhead.policy import load_policy
-from bulkhead.runner import (
+from blastgate.policy import load_policy
+from blastgate.runner import (
     PROXY_ALIAS,
     PROXY_PORT,
     RunnerError,
@@ -26,7 +26,7 @@ from bulkhead.runner import (
 from .corpus import Scenario, load_corpus
 
 PROBE_IMAGE = "python:3.12-alpine"
-MARKER = "BULKHEAD_RESULT "
+MARKER = "BLASTGATE_RESULT "
 
 # Outcomes. Only PREVENTED and EXPECTED_ALLOWED count as passes.
 PREVENTED = "prevented"           # denied scenario was blocked
@@ -90,7 +90,7 @@ def _parse_marker(stdout: str) -> Optional[dict]:
 
 def _run_probe(script: str, argument: str, ecosystem: str, enable: Sequence[str]) -> dict:
     runtime = detect_runtime()
-    base = Path.home() / ".bulkhead-tests"
+    base = Path.home() / ".blastgate-tests"
     base.mkdir(parents=True, exist_ok=True)
     project = Path(tempfile.mkdtemp(dir=base))
     audit = default_audit_path(project)
@@ -120,7 +120,7 @@ def _run_probe(script: str, argument: str, ecosystem: str, enable: Sequence[str]
 
 
 def _scratch_project() -> Path:
-    base = Path.home() / ".bulkhead-tests"
+    base = Path.home() / ".blastgate-tests"
     base.mkdir(parents=True, exist_ok=True)
     return Path(tempfile.mkdtemp(dir=base))
 
@@ -131,7 +131,7 @@ def _run_install_scenario(scenario: Scenario) -> Outcome:
     The false-positive guard. Closing a gap by breaking the feature it belonged
     to is not closing it, and this is the scenario most likely to catch that.
     """
-    from bulkhead.runner import default_anchor_path
+    from blastgate.runner import default_anchor_path
 
     project = _scratch_project()
     manifest = {"name": "corpus-demo", "version": "1.0.0"}
@@ -175,7 +175,7 @@ def _run_image_scenario(scenario: Scenario) -> Outcome:
     tests a precondition rather than an outcome. A lifecycle script cannot run
     where nothing exists to run it.
     """
-    from bulkhead.runner import INTERNAL_NETWORK, ensure_networks, run_sandboxed
+    from blastgate.runner import INTERNAL_NETWORK, ensure_networks, run_sandboxed
 
     runtime = detect_runtime()
     ensure_networks(runtime)
@@ -247,7 +247,7 @@ def _run_audit_scenario(scenario: Scenario) -> Outcome:
     No container involved. The attacker here is someone with write access to
     the log after a run, which is what the anchor store exists to detect.
     """
-    from bulkhead.audit import AnchorStore, AuditLog, TamperError
+    from blastgate.audit import AnchorStore, AuditLog, TamperError
 
     directory = Path(tempfile.mkdtemp())
     try:

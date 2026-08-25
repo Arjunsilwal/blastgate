@@ -1,4 +1,4 @@
-# bulkhead
+# blastgate
 
 > **Status: pre-alpha. Every control in the design is built and demonstrated
 > against running containers.** A real `npm install` completes inside the
@@ -35,7 +35,7 @@ allowlist; everything else is denied and logged.
 It should not matter how the code got execution, because there is nothing to
 steal and nowhere to send it.
 
-Bulkhead does not tell you whether a package is malicious. It assumes the answer
+Blastgate does not tell you whether a package is malicious. It assumes the answer
 is yes and constrains what that can accomplish.
 
 ## What works today
@@ -50,11 +50,11 @@ is yes and constrains what that can accomplish.
 
 ## Does it break real installs?
 
-The corpus measures what bulkhead stops. This measures what it breaks, which is
+The corpus measures what blastgate stops. This measures what it breaks, which is
 the number that decides whether anyone keeps it switched on.
 
 Every project is installed twice: once in a plain container with full network
-access, and once under bulkhead. Without that control a failure means nothing —
+access, and once under blastgate. Without that control a failure means nothing —
 the project might simply be broken, and counting that as a false positive would
 hide real breakage in noise.
 
@@ -62,7 +62,7 @@ hide real breakage in noise.
 python scripts/compat_check.py
 ```
 
-**16 of 16 projects install unchanged under bulkhead. No false positives found.**
+**16 of 16 projects install unchanged under blastgate. No false positives found.**
 
 | Project | Ecosystem | Why it is here | Verdict |
 | --- | --- | --- | --- |
@@ -84,7 +84,7 @@ python scripts/compat_check.py
 `date-fns` is excluded because its *control* install fails too: `oxlint@^1.65.0`
 floats forward into a peer conflict with its own pinned sibling, so the tag does
 not install today under any sandbox. That is upstream's conflict, not
-bulkhead's. The report prints the `ERESOLVE` output so the exclusion can be
+blastgate's. The report prints the `ERESOLVE` output so the exclusion can be
 checked rather than taken on trust.
 
 Both runs are retried the same number of times. An unretried control silently
@@ -98,7 +98,7 @@ Read it as "no false positives found in sixteen projects", not as a rate.
 
 - **The two hardest npm cases passed for reasons unrelated to this design.**
   esbuild and sharp were included because they historically downloaded binaries
-  from GitHub releases at postinstall, which bulkhead denies. Both now ship
+  from GitHub releases at postinstall, which blastgate denies. Both now ship
   platform binaries as npm optional dependencies served from the registry. The
   ecosystem moved somewhere convenient; that is luck, and it can move back.
 - **The pypi and cargo cases are synthetic manifests**, not cloned projects.
@@ -152,7 +152,7 @@ actually scores.
 This number moves when the corpus grows, in both directions, and neither
 direction means what it looks like. It fell from 88% to 85% when two disclosed
 gaps started being counted against a larger set, and rose again when scenarios
-were added that bulkhead prevents. A rate that can only rise is a curated one,
+were added that blastgate prevents. A rate that can only rise is a curated one,
 and there is a test asserting that adding an honest gap lowers it.
 
 Scenarios are drawn from documented incidents where one exists. The
@@ -190,7 +190,7 @@ reachable, the registry is not, and no package lifecycle script executes. The
 install then reads them from a read-only local mirror.
 
 ```bash
-bh run npm --allow git-dependencies -- npm install
+blast run npm --allow git-dependencies -- npm install
 ```
 
 `--allow git-dependencies` no longer opens a host to the install. It permits the
@@ -216,7 +216,7 @@ It is a narrowing, not a solution. The registry has to stay reachable during an
 install, and a registry accepts writes — that residual is the corpus scenario
 `exfil-via-registry-during-install`, counted as a failure below. And an
 ecosystem added later has no parser until one is written, so it keeps the older
-arrangement and `bh run` warns when that path is taken.
+arrangement and `blast run` warns when that path is taken.
 
 The audit log is written to a directory mounted into the proxy container and
 nowhere else, so the sandbox cannot read or delete it. Pointing `--audit` inside
@@ -229,7 +229,7 @@ hash and entry count in a separate anchor store. Truncating a log no longer
 passes verification, and anchors are chained across runs so deleting a whole run
 is equally visible.
 
-`bh audit` distinguishes two verdicts that a hash chain alone conflates:
+`blast audit` distinguishes two verdicts that a hash chain alone conflates:
 
 ```
 OK: chain verified against anchor, 12 entries (anchored at 12 by run 4f2a91c0)
@@ -246,19 +246,19 @@ that limit is asserted by a test so it cannot be quietly assumed closed.
 Requires Docker or Podman.
 
 ```bash
-bh run npm -- npm ci
+blast run npm -- npm ci
 ```
 
-The install command goes after `--`. Bulkhead's own options go before it:
+The install command goes after `--`. Blastgate's own options go before it:
 
 ```bash
-bh run npm --project ./app --allow git-dependencies -- npm install
+blast run npm --project ./app --allow git-dependencies -- npm install
 ```
 
 Then review what it tried to reach:
 
 ```bash
-bh audit ~/.bulkhead/audit/<project>-<hash>.log
+blast audit ~/.blastgate/audit/<project>-<hash>.log
 ```
 
 Every failure path refuses rather than falling back. A missing runtime, a
@@ -274,7 +274,7 @@ pip install -e .
 ```
 
 ```bash
-bh check npm registry.npmjs.org
+blast check npm registry.npmjs.org
 ```
 
 ```
@@ -284,16 +284,16 @@ ALLOW registry.npmjs.org (matched: exact:registry.npmjs.org) - Primary package r
 Default is deny, and every allow path is explicit:
 
 ```
-$ bh check npm evil.example.com
+$ blast check npm evil.example.com
 DENY evil.example.com - default deny: host not in allowlist
 
-$ bh check npm cdn.npmjs.org
+$ blast check npm cdn.npmjs.org
 ALLOW cdn.npmjs.org (matched: wildcard:*.npmjs.org) - Registry CDN edge nodes and asset endpoints
 
-$ bh check npm registry.npmjs.org.evil.com
+$ blast check npm registry.npmjs.org.evil.com
 DENY registry.npmjs.org.evil.com - default deny: host not in allowlist
 
-$ bh check npm 127.0.0.1
+$ blast check npm 127.0.0.1
 DENY 127.0.0.1 - invalid hostname: Raw IP addresses are not allowed: 127.0.0.1
 ```
 
@@ -301,10 +301,10 @@ Hosts that are commonly needed but double as exfiltration channels are denied
 unless you opt in by name:
 
 ```
-$ bh check npm github.com
+$ blast check npm github.com
 DENY github.com - conditional host requires condition 'git-dependencies': Direct git repository dependencies and GitHub release assets
 
-$ bh check npm github.com --allow git-dependencies
+$ blast check npm github.com --allow git-dependencies
 ALLOW github.com (matched: conditional:github.com) - Direct git repository dependencies and GitHub release assets
 ```
 
@@ -326,7 +326,7 @@ most likely to matter to you:
 - **DNS-based exfiltration.** Not detected.
 - **Post-install runtime.** Protects the install, not the application later.
 - **Compromised base image or package manager.** Enforces nothing useful.
-- **Ports are not policy.** `bh check npm registry.npmjs.org:8443` reports ALLOW
+- **Ports are not policy.** `blast check npm registry.npmjs.org:8443` reports ALLOW
   because policy decides on hostname alone. The proxy restricts tunnelling to
   443, so the two disagree when inspected separately.
 - **Your project must live where the runtime can see it.** On macOS the runtime
@@ -337,7 +337,7 @@ most likely to matter to you:
 
 Every protection claim maps to a test that fails when the control is removed. A
 control with no test is a claim, not a protection, and stays in the gaps list
-until it has one. If a change alters what bulkhead protects against, the threat
+until it has one. If a change alters what blastgate protects against, the threat
 model changes in the same commit.
 
 That is also why the threat model is the first commit in this repository and the

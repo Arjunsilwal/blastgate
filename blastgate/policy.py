@@ -1,4 +1,4 @@
-"""Policy engine for bulkhead egress control.
+"""Policy engine for blastgate egress control.
 
 Pure logic: No network, no subprocess, no filesystem beyond reading allowlists, no model calls.
 """

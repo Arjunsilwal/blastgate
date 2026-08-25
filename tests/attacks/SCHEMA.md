@@ -1,6 +1,6 @@
 # Attack scenario format
 
-One scenario per file. A scenario is a claim about what bulkhead does when a
+One scenario per file. A scenario is a claim about what blastgate does when a
 payload tries something specific, written so it can be executed rather than
 asserted.
 
@@ -24,7 +24,7 @@ note: >
 
 ## `expect`
 
-- **`denied`** — bulkhead must refuse this. A scenario that stops being denied is
+- **`denied`** — blastgate must refuse this. A scenario that stops being denied is
   a regression.
 - **`allowed`** — legitimate traffic that must keep working. These guard the
   false-positive budget, which is near zero.
