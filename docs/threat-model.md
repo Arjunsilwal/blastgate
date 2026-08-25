@@ -14,7 +14,7 @@ wired to any package manager. **Nothing in section 6 constitutes protection of a
 real install today.** See section 7 for the precise gap between design and
 implementation.
 
-Document version: 15. Last reviewed: 2026-08-22.
+Document version: 16. Last reviewed: 2026-08-22.
 
 **Design note, recorded because it departs from the v0 plan.** The plan specified
 environment variables "filtered by shape (prefix, and any name containing TOKEN,
@@ -243,7 +243,12 @@ connectivity would satisfy every isolation assertion while proving nothing.
 | A registry tarball URL is not mistaken for a git dependency | https URLs need `git+` or `.git` | `test_resolve.py::TestGitSpecParsing::test_dependencies_come_from_the_lockfile_too` |
 | An unparseable manifest refuses the run *(constrains blastgate)* | Guessing the dependency set is worse than stopping | `test_resolve.py::TestGitSpecParsing::test_an_unparseable_manifest_refuses_rather_than_guesses` |
 | A shell metacharacter in a manifest cannot escape the clone script | Arguments are shell-quoted independently of the parser's charset | `test_resolve.py::TestCloneScript::test_shell_metacharacters_cannot_escape_the_script` |
-| A sidecar left by a killed run cannot serve the next one *(constrains blastgate)* | Refuses to start when the internal network already has a proxy | `test_topology.py::TestStaleSidecar::test_a_stale_proxy_on_the_network_is_refused` |
+| A sidecar left by a killed run cannot serve the next one *(runtime)* | Networks are per-run, so a leftover is not on anyone else's | `TestStaleSidecar::test_a_stale_proxy_cannot_reach_another_runs_network` |
+| Two projects install concurrently without interfering *(runtime)* | One internal network per run | `test_end_to_end.py::TestConcurrency::test_two_projects_install_at_the_same_time` |
+| Concurrent runs against one project are refused *(constrains blastgate)* | Interleaved appends would break the audit chain | `TestConcurrency::test_the_same_project_twice_at_once_is_refused` |
+| A killed run's sidecar is removed by the next run *(constrains blastgate)* | Containers carry the supervising pid | `TestRunLifecycle::test_a_sidecar_with_a_dead_supervisor_is_reaped` |
+| A running install's sidecar is never reaped *(constrains blastgate)* | Liveness is checked before removal | `TestRunLifecycle::test_a_live_sidecar_is_never_reaped` |
+| Run networks do not leak *(runtime)* | Removed in a finally block | `TestConcurrency::test_the_run_network_is_removed_afterwards` |
 | The proxy image cannot enforce a stale allowlist *(constrains blastgate)* | Image tag is derived from the source and allowlist contents, so a policy change forces a rebuild | `TestProxyImageFreshness::test_changing_an_allowlist_changes_the_image_tag` |
 
 Two deliberate properties worth stating because they surprise people:
@@ -460,18 +465,18 @@ and they are not nothing.
   have nothing to do with this design. If packages move back toward fetching
   binaries from arbitrary hosts at install time, the false-positive rate rises
   sharply and no code change here caused it.
-- **Two installs cannot run at once.** Every sidecar answers to the same network
-  alias, so a second one makes resolution a coin toss: requests could be
-  enforced by either container's policy and logged to either container's file.
-  Detected and refused rather than raced, but the underlying limit is real and
-  the remedy is to wait rather than to parallelise.
-- **A killed run leaves its sidecar behind.** The container is started with
-  `--rm`, which does not help when the process supervising it is killed first.
-  Found in practice: a run cancelled mid-install left a proxy attached to the
-  internal network for two hours, and the next run was refused by the policy
-  that container happened to be holding while its own decisions went to an audit
-  path inside a deleted directory. The next run now refuses with the command to
-  clean up, but nothing reaps the container on its own.
+- **Two installs against the same project cannot run at once.** Different
+  projects run in parallel freely, each on its own internal network. The same
+  project is refused, and the reason is the audit log rather than the network:
+  appending reads and verifies the whole chain before writing a tail, so two
+  writers interleave into a log that no longer verifies. The lock is `flock`, so
+  a killed run releases it rather than wedging the next one.
+- **An orphaned sidecar is reaped, not merely refused.** `--rm` does not fire
+  when the supervising process is killed rather than allowed to exit, so
+  containers record the pid that started them and a later run removes the ones
+  whose supervisor is gone. A reused pid can leave a dead sidecar looking alive,
+  which leaks a container; it cannot make a live one look dead, so reaping never
+  drops another install's enforcement mid-flight.
 - **Nothing binds an install to its declared ecosystem.** Running an `npm` install
   under the `pypi` allowlist is a user error the tool does not currently catch.
 - **Unicode and IDN hostnames are rejected outright**, not punycode-normalized.

@@ -32,7 +32,9 @@ payload has no reason to honour them. What stops it is that there is no route to
 find. See tests/test_end_to_end.py.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass
+import fcntl
 import hashlib
 import json
 import os
@@ -287,8 +289,30 @@ def detect_runtime(candidates: Sequence[str] = ("docker", "podman")) -> str:
 # preference: a payload cannot opt out of policy because there is nothing to
 # opt out to.
 
-INTERNAL_NETWORK = "blastgate-internal"
+# One internal network per run, so two installs cannot collide.
+#
+# A single shared network meant every sidecar answered to the same alias, which
+# made resolution a coin toss the moment two runs overlapped: requests could be
+# enforced by the wrong policy and logged to the wrong file. Refusing the second
+# run made that safe but left concurrency impossible, which is fatal in CI where
+# parallel jobs are the normal case.
+#
+# Isolating the network removes the collision structurally rather than guarding
+# against it. The external network stays shared: nothing is aliased there, so
+# there is nothing to collide over.
+INTERNAL_NETWORK_PREFIX = "blastgate-internal"
+INTERNAL_NETWORK = INTERNAL_NETWORK_PREFIX          # the unscoped default
 EXTERNAL_NETWORK = "blastgate-external"
+
+RUN_LABEL = "blastgate.run"
+PID_LABEL = "blastgate.pid"
+
+
+def internal_network_name(run_id: Optional[str] = None) -> str:
+    """The internal network for one run, or the shared default for none."""
+    if not run_id:
+        return INTERNAL_NETWORK_PREFIX
+    return f"{INTERNAL_NETWORK_PREFIX}-{run_id[:8]}"
 
 SANDBOX_WORKDIR = "/workspace"
 
@@ -315,24 +339,27 @@ def network_exists(name: str, runtime: str = "docker") -> bool:
     return result.returncode == 0
 
 
-def ensure_networks(runtime: str = "docker") -> None:
-    """Create the two networks if they do not exist.
+def ensure_networks(runtime: str = "docker", run_id: Optional[str] = None) -> str:
+    """Create this run's networks if absent. Returns the internal network name.
 
     The internal network is created with --internal, which is what removes the
     route out. Without that flag this whole design is decoration, so its
     absence is treated as a failure rather than a warning.
+
+    Creation races are tolerated: two runs starting together may both try to
+    create the shared external network, and losing that race is not an error so
+    long as the network exists afterwards.
     """
-    if not network_exists(INTERNAL_NETWORK, runtime):
-        result = _run([runtime, "network", "create", "--internal", INTERNAL_NETWORK])
-        if result.returncode != 0:
-            raise RunnerError(f"failed to create {INTERNAL_NETWORK}: {result.stderr.strip()}")
+    internal = internal_network_name(run_id)
+    for name, extra in ((internal, ["--internal"]), (EXTERNAL_NETWORK, [])):
+        if network_exists(name, runtime):
+            continue
+        result = _run([runtime, "network", "create", *extra, name])
+        if result.returncode != 0 and not network_exists(name, runtime):
+            raise RunnerError(f"failed to create {name}: {result.stderr.strip()}")
 
-    if not network_exists(EXTERNAL_NETWORK, runtime):
-        result = _run([runtime, "network", "create", EXTERNAL_NETWORK])
-        if result.returncode != 0:
-            raise RunnerError(f"failed to create {EXTERNAL_NETWORK}: {result.stderr.strip()}")
-
-    assert_network_is_internal(INTERNAL_NETWORK, runtime)
+    assert_network_is_internal(internal, runtime)
+    return internal
 
 
 def assert_network_is_internal(name: str, runtime: str = "docker") -> None:
@@ -353,9 +380,14 @@ def assert_network_is_internal(name: str, runtime: str = "docker") -> None:
         )
 
 
-def remove_networks(runtime: str = "docker") -> None:
-    for name in (INTERNAL_NETWORK, EXTERNAL_NETWORK):
+def remove_networks(runtime: str = "docker", run_id: Optional[str] = None) -> None:
+    for name in (internal_network_name(run_id), EXTERNAL_NETWORK):
         _run([runtime, "network", "rm", name])
+
+
+def remove_run_network(runtime: str, run_id: str) -> None:
+    """Drop one run's internal network. Safe when it is already gone."""
+    _run([runtime, "network", "rm", internal_network_name(run_id)])
 
 
 def run_sandboxed(
@@ -382,7 +414,7 @@ def run_sandboxed(
     if not project_dir.is_dir():
         raise RunnerError(f"project directory does not exist: {project_dir}")
 
-    if network == INTERNAL_NETWORK:
+    if network.startswith(INTERNAL_NETWORK_PREFIX):
         assert_network_is_internal(network, runtime)
 
     argv = [
@@ -626,10 +658,10 @@ def ensure_proxy_image(runtime: str, context: Optional[Path] = None) -> str:
     return image
 
 
-def existing_proxy_containers(runtime: str) -> List[str]:
-    """Proxy containers already attached to the internal network."""
+def existing_proxy_containers(runtime: str, network: Optional[str] = None) -> List[str]:
+    """Proxy containers attached to one internal network."""
     result = _run([
-        runtime, "network", "inspect", INTERNAL_NETWORK,
+        runtime, "network", "inspect", network or INTERNAL_NETWORK,
         "--format", "{{range .Containers}}{{.Name}} {{end}}",
     ])
     if result.returncode != 0:
@@ -637,7 +669,7 @@ def existing_proxy_containers(runtime: str) -> List[str]:
     return sorted(n for n in result.stdout.split() if n.startswith(f"{PROXY_IMAGE_REPO}-"))
 
 
-def assert_no_stale_proxy(runtime: str) -> None:
+def assert_no_stale_proxy(runtime: str, network: Optional[str] = None) -> None:
     """Refuse to start a second sidecar on the internal network.
 
     Every sidecar answers to the same network alias, so two of them make
@@ -655,18 +687,112 @@ def assert_no_stale_proxy(runtime: str) -> None:
     install in progress, and killing that one would drop its enforcement
     mid-flight.
     """
-    existing = existing_proxy_containers(runtime)
+    network = network or INTERNAL_NETWORK
+    existing = existing_proxy_containers(runtime, network)
     if not existing:
         return
     names = " ".join(existing)
     raise RunnerError(
-        f"a blastgate proxy is already attached to {INTERNAL_NETWORK}: {names}. "
+        f"a blastgate proxy is already attached to {network}: {names}. "
         f"Two sidecars share one network alias, so requests would be routed to "
         f"either one and decisions could be enforced by the wrong policy and "
         f"logged to the wrong file. If another install is running, wait for it. "
         f"If one was left behind by a killed run, remove it with: "
         f"{runtime} rm -f {names}"
     )
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # alive, owned by someone else, not ours to reap
+    return True
+
+
+def orphaned_sidecars(runtime: str) -> List[Tuple[str, str]]:
+    """Sidecars whose supervising process is gone. Returns (container, run_id).
+
+    A sidecar is started with --rm, which does nothing when the process
+    supervising it is killed rather than allowed to exit. One survived a
+    cancelled run here for two hours. Recording the supervising pid on the
+    container is what makes that detectable afterwards.
+
+    A reused pid can only leave a dead sidecar looking alive, never make a live
+    one look dead, so the failure mode is leaking rather than killing someone
+    else's install.
+    """
+    fmt = '{{.ID}}\t{{.Label "' + PID_LABEL + '"}}\t{{.Label "' + RUN_LABEL + '"}}'
+    result = _run([runtime, "ps", "-a", "--filter", f"label={PID_LABEL}", "--format", fmt])
+    if result.returncode != 0:
+        return []
+    orphans: List[Tuple[str, str]] = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        container, raw_pid, run_id = parts
+        try:
+            pid = int(raw_pid)
+        except ValueError:
+            continue
+        if not _pid_alive(pid):
+            orphans.append((container, run_id))
+    return orphans
+
+
+def reap_orphaned_sidecars(runtime: str) -> List[str]:
+    """Remove sidecars left by killed runs, and the networks they held."""
+    removed = []
+    for container, run_id in orphaned_sidecars(runtime):
+        _run([runtime, "rm", "-f", container], timeout=30)
+        if run_id:
+            remove_run_network(runtime, run_id)
+        removed.append(container)
+    return removed
+
+
+def lock_path(project_dir: Path) -> Path:
+    project_dir = Path(project_dir).resolve()
+    digest = hashlib.sha256(str(project_dir).encode("utf-8")).hexdigest()[:12]
+    return Path.home() / ".blastgate" / "locks" / f"{project_dir.name}-{digest}.lock"
+
+
+@contextmanager
+def project_lock(project_dir: Path):
+    """Refuse a second concurrent run against the same project.
+
+    Different projects run in parallel freely; this is not about the network.
+    It is about the audit log. Appending reads the whole chain, verifies it and
+    writes a new tail, so two runs sharing one log interleave and produce a
+    chain that no longer verifies - turning a tamper-evident record into a
+    false alarm.
+
+    flock is released by the kernel when the process dies, so a killed run
+    frees its own lock rather than wedging the next one.
+    """
+    path = lock_path(project_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "w")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise RunnerError(
+            f"another blastgate run is already active for "
+            f"{Path(project_dir).resolve()}. Runs against different projects are "
+            f"fine in parallel; two against the same one would interleave writes "
+            f"to a single audit log and break its chain. Wait for the other run."
+        )
+    try:
+        yield path
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 class ProxySidecar:
@@ -685,7 +811,11 @@ class ProxySidecar:
         enabled_conditions: Optional[Set[str]] = None,
         name: Optional[str] = None,
         image: Optional[str] = None,
+        network: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> None:
+        self.run_id = run_id or uuid.uuid4().hex
+        self.network = network or INTERNAL_NETWORK
         self.image = image or proxy_image_tag()
         self.ecosystem = ecosystem
         self.audit_path = Path(audit_path).resolve()
@@ -695,14 +825,19 @@ class ProxySidecar:
         self._started = False
 
     def start(self) -> "ProxySidecar":
-        assert_no_stale_proxy(self.runtime)
+        assert_no_stale_proxy(self.runtime, self.network)
         self.audit_path.parent.mkdir(parents=True, exist_ok=True)
 
         argv = [
             self.runtime, "run", "-d", "--rm",
             "--name", self.name,
-            "--network", INTERNAL_NETWORK,
+            "--network", self.network,
             "--network-alias", PROXY_ALIAS,
+            # The supervising pid is what makes an abandoned sidecar
+            # identifiable later. --rm does not fire when this process is
+            # killed rather than allowed to exit.
+            "--label", f"{RUN_LABEL}={self.run_id}",
+            "--label", f"{PID_LABEL}={os.getpid()}",
             # The audit directory is mounted here and nowhere else. The install
             # container has no path to it.
             "--mount", f"type=bind,source={self.audit_path.parent},target=/audit",
@@ -818,88 +953,105 @@ def run_install(
     explicit_image = image is not None
     enabled_conditions = set(enabled_conditions or ())
 
-    # Resolve phase. Anything declared is fetched now, while no project code is
-    # running, and served locally during the install.
-    dependencies = parse_git_dependencies(project_dir, policy.ecosystem)
-    cache_dir = Path(git_cache_dir or GIT_CACHE_DIR).resolve()
-    if dependencies:
-        if not (enabled_conditions & RESOLVE_ONLY_CONDITIONS):
-            names = ", ".join(sorted({d.name for d in dependencies}))
-            raise UnresolvableDependencyError(
-                f"this project declares git dependencies ({names}) and the "
-                f"resolve phase is not enabled. Re-run with "
-                f"--allow git-dependencies, which fetches them before the "
-                f"install starts rather than opening a forge to it."
-            )
-        resolve_git_dependencies(
-            dependencies, audit_path=audit_path, ecosystem=policy.ecosystem,
-            runtime=runtime, cache_dir=cache_dir, timeout=timeout,
-        )
-
-    if explicit_image:
-        pass
-    elif dependencies:
-        # Every one of these package managers shells out to git even when the
-        # repository is already local, and none of the base images ships it.
-        image = ensure_install_image(runtime, policy.ecosystem)
-    else:
-        image = default_image_for(policy.ecosystem)
-
-    # For npm the forge is not reachable from the install, whatever the user
-    # enabled: git-dependencies permits the resolve phase and grants the install
-    # nothing. Other ecosystems have no resolve phase yet, so the condition
-    # keeps its older meaning there and the forge gap stays open for them.
-    install_conditions = install_phase_conditions(policy.ecosystem, enabled_conditions)
-    if install_conditions & RESOLVE_ONLY_CONDITIONS:
-        sys.stderr.write(
-            f"blast: warning: {policy.ecosystem} has no resolve phase, so code "
-            f"forges stay reachable for the whole install. A payload that "
-            f"reaches one can exfiltrate through it. See threat-model 8.1.\n"
-        )
-
-    ensure_networks(runtime)
-    image_tag = ensure_proxy_image(runtime)
-
-    env = dict(strip_environment(host_env if host_env is not None else os.environ).passed)
-    env.update(PROXY_ENV)
-
-    extra_mounts: List[Tuple[Path, str, bool]] = []
-    if dependencies:
-        # Read-only. A writable cache would be a channel from the install back
-        # into the phase that has forge access.
-        extra_mounts.append((cache_dir, CACHE_MOUNT, True))
-        env["GIT_CONFIG_GLOBAL"] = f"{CACHE_MOUNT}/{GITCONFIG_NAME}"
-        env["GIT_TERMINAL_PROMPT"] = "0"
-        # cargo fetches with libgit2 by default, which ignores url.insteadOf.
-        # Without this the rewrite is silently skipped and cargo dials the
-        # forge it is not allowed to reach.
-        env["CARGO_NET_GIT_FETCH_WITH_CLI"] = "true"
-
     run_id = uuid.uuid4().hex
 
-    with ProxySidecar(
-        policy.ecosystem,
-        audit_path=audit_path,
-        runtime=runtime,
-        enabled_conditions=install_conditions,
-        image=image_tag,
-    ):
-        result = run_sandboxed(
-            command,
-            project_dir,
-            image,
-            runtime=runtime,
-            env=env,
-            network=INTERNAL_NETWORK,
-            extra_mounts=extra_mounts,
-            timeout=timeout,
-        )
+    # Everything below runs under a per-project lock, on a network of this
+    # run's own. Different projects run in parallel; the same project does not,
+    # because both runs would append to one audit log and interleave its chain
+    # into something that no longer verifies.
+    with project_lock(project_dir):
+        # A sidecar from a killed run can no longer serve this one, now that
+        # networks are per-run, but it is still a leaked container holding a
+        # leaked network. Clear those before adding more.
+        reap_orphaned_sidecars(runtime)
+        network = ensure_networks(runtime, run_id)
+        try:
+            # Resolve phase. Anything declared is fetched now, while no project code is
+            # running, and served locally during the install.
+            dependencies = parse_git_dependencies(project_dir, policy.ecosystem)
+            cache_dir = Path(git_cache_dir or GIT_CACHE_DIR).resolve()
+            if dependencies:
+                if not (enabled_conditions & RESOLVE_ONLY_CONDITIONS):
+                    names = ", ".join(sorted({d.name for d in dependencies}))
+                    raise UnresolvableDependencyError(
+                        f"this project declares git dependencies ({names}) and the "
+                        f"resolve phase is not enabled. Re-run with "
+                        f"--allow git-dependencies, which fetches them before the "
+                        f"install starts rather than opening a forge to it."
+                    )
+                resolve_git_dependencies(
+                    dependencies, audit_path=audit_path, ecosystem=policy.ecosystem,
+                    runtime=runtime, cache_dir=cache_dir, network=network,
+                    run_id=run_id, timeout=timeout,
+                )
 
-    # Anchored here, on the host, after the sidecar is gone. A different
-    # process from the one that wrote the log, writing to a store that process
-    # never had mounted.
-    AnchorStore(anchor_path).append(run_id, audit_path, AuditLog(audit_path).read_all())
-    return result
+            if explicit_image:
+                pass
+            elif dependencies:
+                # Every one of these package managers shells out to git even when the
+                # repository is already local, and none of the base images ships it.
+                image = ensure_install_image(runtime, policy.ecosystem)
+            else:
+                image = default_image_for(policy.ecosystem)
+
+            # For npm the forge is not reachable from the install, whatever the user
+            # enabled: git-dependencies permits the resolve phase and grants the install
+            # nothing. Other ecosystems have no resolve phase yet, so the condition
+            # keeps its older meaning there and the forge gap stays open for them.
+            install_conditions = install_phase_conditions(policy.ecosystem, enabled_conditions)
+            if install_conditions & RESOLVE_ONLY_CONDITIONS:
+                sys.stderr.write(
+                    f"blast: warning: {policy.ecosystem} has no resolve phase, so code "
+                    f"forges stay reachable for the whole install. A payload that "
+                    f"reaches one can exfiltrate through it. See threat-model 8.1.\n"
+                )
+
+            image_tag = ensure_proxy_image(runtime)
+
+            env = dict(strip_environment(host_env if host_env is not None else os.environ).passed)
+            env.update(PROXY_ENV)
+
+            extra_mounts: List[Tuple[Path, str, bool]] = []
+            if dependencies:
+                # Read-only. A writable cache would be a channel from the install back
+                # into the phase that has forge access.
+                extra_mounts.append((cache_dir, CACHE_MOUNT, True))
+                env["GIT_CONFIG_GLOBAL"] = f"{CACHE_MOUNT}/{GITCONFIG_NAME}"
+                env["GIT_TERMINAL_PROMPT"] = "0"
+                # cargo fetches with libgit2 by default, which ignores url.insteadOf.
+                # Without this the rewrite is silently skipped and cargo dials the
+                # forge it is not allowed to reach.
+                env["CARGO_NET_GIT_FETCH_WITH_CLI"] = "true"
+
+            with ProxySidecar(
+                policy.ecosystem,
+                audit_path=audit_path,
+                runtime=runtime,
+                enabled_conditions=install_conditions,
+                image=image_tag,
+                network=network,
+                run_id=run_id,
+            ):
+                result = run_sandboxed(
+                    command,
+                    project_dir,
+                    image,
+                    runtime=runtime,
+                    env=env,
+                    network=network,
+                    extra_mounts=extra_mounts,
+                    timeout=timeout,
+                )
+
+            # Anchored here, on the host, after the sidecar is gone. A different
+            # process from the one that wrote the log, writing to a store that process
+            # never had mounted.
+            AnchorStore(anchor_path).append(run_id, audit_path, AuditLog(audit_path).read_all())
+            return result
+        finally:
+            # This network belongs to this run; nothing else can be using it.
+            remove_run_network(runtime, run_id)
+
 
 
 def resolve_git_dependencies(
@@ -909,6 +1061,8 @@ def resolve_git_dependencies(
     runtime: Optional[str] = None,
     cache_dir: Path = GIT_CACHE_DIR,
     image: str = GIT_IMAGE,
+    network: Optional[str] = None,
+    run_id: Optional[str] = None,
     timeout: int = 600,
 ) -> SandboxResult:
     """Fetch declared git dependencies with no project code present.
@@ -925,7 +1079,7 @@ def resolve_git_dependencies(
     cache_dir = Path(cache_dir).resolve()
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    ensure_networks(runtime)
+    network = network or ensure_networks(runtime, run_id)
     image_tag = ensure_proxy_image(runtime)
 
     policy = load_policy(resolve_policy_for(ecosystem))
@@ -937,11 +1091,12 @@ def resolve_git_dependencies(
 
     with ProxySidecar(
         policy.ecosystem, audit_path=audit_path, runtime=runtime, image=image_tag,
+        network=network, run_id=run_id,
     ):
         result = run_sandboxed(
             ["-c", clone_script(dependencies)],
             cache_dir, image, runtime=runtime, env=env,
-            network=INTERNAL_NETWORK, entrypoint="sh", timeout=timeout,
+            network=network, entrypoint="sh", timeout=timeout,
         )
 
     if result.exit_code != 0 or "RESOLVE_OK" not in result.stdout:

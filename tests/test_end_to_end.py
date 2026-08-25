@@ -414,3 +414,109 @@ class TestResolveAcrossEcosystems:
 
     def test_the_pypi_resolve_policy_denies_the_package_index(self):
         assert load_policy("pypi-resolve").evaluate("pypi.org").allowed is False
+
+
+@pytest.mark.skipif(RUNTIME is None, reason="no container runtime available")
+class TestConcurrency:
+    """Two installs at once, which used to be refused outright.
+
+    A single shared network meant every sidecar answered to one alias, so a
+    second run could be served by the first run's proxy - enforced by the wrong
+    policy and logged to the wrong file. Refusing the second run made that safe
+    and made CI impossible, where parallel jobs are the normal case.
+    """
+
+    def _project(self):
+        import json as _json
+
+        base = Path.home() / ".blastgate-tests"
+        base.mkdir(parents=True, exist_ok=True)
+        path = Path(tempfile.mkdtemp(dir=base))
+        (path / "package.json").write_text(_json.dumps({
+            "name": "concurrent", "version": "1.0.0",
+            "dependencies": {"is-odd": "3.0.1"},
+        }))
+        return path
+
+    def test_two_projects_install_at_the_same_time(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        from blastgate.runner import default_anchor_path
+
+        projects = [self._project(), self._project()]
+        audits = [default_audit_path(p) for p in projects]
+        for artefact in audits + [default_anchor_path(p) for p in projects]:
+            if artefact.exists():
+                artefact.unlink()
+
+        def go(pair):
+            project, audit = pair
+            return run_install(
+                policy=load_policy("npm"),
+                command=["npm", "install", "--no-audit", "--no-fund"],
+                project_dir=project, audit_path=audit, host_env={}, timeout=600,
+            )
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(go, zip(projects, audits)))
+            assert [r.exit_code for r in results] == [0, 0]
+            for project in projects:
+                assert (project / "node_modules" / "is-odd").is_dir()
+            # Each run's decisions land in its own log, with its own valid chain.
+            for audit in audits:
+                log = AuditLog(audit)
+                assert log.verify() is True
+                assert any(e.host == "registry.npmjs.org" for e in log.read_all())
+        finally:
+            for project in projects:
+                shutil.rmtree(project, ignore_errors=True)
+            for artefact in audits + [default_anchor_path(p) for p in projects]:
+                if artefact.exists():
+                    artefact.unlink()
+
+    def test_the_run_network_is_removed_afterwards(self):
+        from blastgate.runner import INTERNAL_NETWORK_PREFIX
+
+        before = subprocess.run(
+            [RUNTIME, "network", "ls", "--format", "{{.Name}}"],
+            capture_output=True, text=True,
+        ).stdout.split()
+        project = self._project()
+        audit = default_audit_path(project)
+        try:
+            run_install(
+                policy=load_policy("npm"), command=["true"],
+                project_dir=project, audit_path=audit, host_env={}, timeout=300,
+            )
+        finally:
+            shutil.rmtree(project, ignore_errors=True)
+            if audit.exists():
+                audit.unlink()
+
+        after = subprocess.run(
+            [RUNTIME, "network", "ls", "--format", "{{.Name}}"],
+            capture_output=True, text=True,
+        ).stdout.split()
+        leaked = [
+            n for n in after
+            if n.startswith(f"{INTERNAL_NETWORK_PREFIX}-") and n not in before
+        ]
+        assert not leaked, f"run networks leaked: {leaked}"
+
+    def test_the_same_project_twice_at_once_is_refused(self):
+        # Not a network problem. Both runs would append to one audit log, and
+        # appending reads and verifies the whole chain before writing a tail,
+        # so interleaving them produces a log that no longer verifies.
+        from blastgate.runner import RunnerError, project_lock
+
+        project = self._project()
+        try:
+            with project_lock(project):
+                with pytest.raises(RunnerError, match="already active"):
+                    run_install(
+                        policy=load_policy("npm"), command=["true"],
+                        project_dir=project, host_env={}, timeout=120,
+                    )
+        finally:
+            shutil.rmtree(project, ignore_errors=True)

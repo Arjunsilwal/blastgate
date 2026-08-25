@@ -239,7 +239,7 @@ class TestStaleSidecar:
         try:
             assert name in existing_proxy_containers(RUNTIME)
             with pytest.raises(RunnerError, match="already attached"):
-                assert_no_stale_proxy(RUNTIME)
+                assert_no_stale_proxy(RUNTIME, INTERNAL_NETWORK)
             # And the sidecar itself refuses to start rather than racing it.
             with pytest.raises(RunnerError, match="already attached"):
                 ProxySidecar("npm", audit_path=project / "audit.log", runtime=RUNTIME).start()
@@ -250,3 +250,129 @@ class TestStaleSidecar:
         from blastgate.runner import assert_no_stale_proxy
 
         assert_no_stale_proxy(RUNTIME) is None
+
+    def test_a_stale_proxy_cannot_reach_another_runs_network(self, project):
+        # The structural fix. A leftover sidecar sits on the network of the run
+        # that created it, so it is not on anyone else's and cannot serve them
+        # whatever policy it happens to be holding.
+        from blastgate.runner import (
+            PROXY_IMAGE_REPO,
+            assert_no_stale_proxy,
+            ensure_networks,
+            internal_network_name,
+            remove_run_network,
+        )
+
+        stale_run, live_run = "aaaaaaaa11", "bbbbbbbb22"
+        ensure_networks(RUNTIME, stale_run)
+        ensure_networks(RUNTIME, live_run)
+        name = f"{PROXY_IMAGE_REPO}-cross-test"
+        subprocess.run([RUNTIME, "rm", "-f", name], capture_output=True)
+        subprocess.run(
+            [RUNTIME, "run", "-d", "--name", name,
+             "--network", internal_network_name(stale_run), IMAGE, "sleep", "60"],
+            capture_output=True,
+        )
+        try:
+            # Refused on its own network...
+            with pytest.raises(RunnerError, match="already attached"):
+                assert_no_stale_proxy(RUNTIME, internal_network_name(stale_run))
+            # ...and invisible to the other run entirely.
+            assert assert_no_stale_proxy(RUNTIME, internal_network_name(live_run)) is None
+        finally:
+            subprocess.run([RUNTIME, "rm", "-f", name], capture_output=True)
+            remove_run_network(RUNTIME, stale_run)
+            remove_run_network(RUNTIME, live_run)
+
+
+class TestRunLifecycle:
+    """Per-run networks, orphan reaping, and the per-project lock."""
+
+    def test_each_run_gets_its_own_network_name(self):
+        from blastgate.runner import INTERNAL_NETWORK_PREFIX, internal_network_name
+
+        first, second = internal_network_name("a" * 32), internal_network_name("b" * 32)
+        assert first != second
+        assert first.startswith(INTERNAL_NETWORK_PREFIX)
+        assert internal_network_name() == INTERNAL_NETWORK_PREFIX
+
+    def test_a_run_network_is_internal_and_removable(self):
+        from blastgate.runner import (
+            assert_network_is_internal,
+            ensure_networks,
+            internal_network_name,
+            network_exists,
+            remove_run_network,
+        )
+
+        run_id = "cccccccc33"
+        name = ensure_networks(RUNTIME, run_id)
+        try:
+            assert name == internal_network_name(run_id)
+            assert network_exists(name, RUNTIME)
+            assert_network_is_internal(name, RUNTIME)
+        finally:
+            remove_run_network(RUNTIME, run_id)
+        assert not network_exists(internal_network_name(run_id), RUNTIME)
+
+    def test_a_sidecar_with_a_dead_supervisor_is_reaped(self):
+        # --rm does not fire when the supervising process is killed rather than
+        # allowed to exit. The recorded pid is what makes the leftover
+        # identifiable afterwards.
+        from blastgate.runner import (
+            PID_LABEL,
+            PROXY_IMAGE_REPO,
+            RUN_LABEL,
+            orphaned_sidecars,
+            reap_orphaned_sidecars,
+        )
+
+        # A pid that has certainly exited.
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+
+        run_id = "dddddddd44"
+        name = f"{PROXY_IMAGE_REPO}-reap-test"
+        subprocess.run([RUNTIME, "rm", "-f", name], capture_output=True)
+        subprocess.run(
+            [RUNTIME, "run", "-d", "--name", name,
+             "--label", f"{RUN_LABEL}={run_id}",
+             "--label", f"{PID_LABEL}={dead.pid}",
+             IMAGE, "sleep", "120"],
+            capture_output=True,
+        )
+        try:
+            assert any(r == run_id for _, r in orphaned_sidecars(RUNTIME))
+            reap_orphaned_sidecars(RUNTIME)
+            listed = subprocess.run(
+                [RUNTIME, "ps", "-a", "--format", "{{.Names}}"], capture_output=True, text=True
+            ).stdout
+            assert name not in listed
+        finally:
+            subprocess.run([RUNTIME, "rm", "-f", name], capture_output=True)
+
+    def test_a_live_sidecar_is_never_reaped(self):
+        # Reaping someone else's running install would drop its enforcement
+        # mid-flight, which is far worse than leaking a container.
+        import os
+
+        from blastgate.runner import (
+            PID_LABEL,
+            PROXY_IMAGE_REPO,
+            RUN_LABEL,
+            orphaned_sidecars,
+        )
+
+        name = f"{PROXY_IMAGE_REPO}-live-test"
+        subprocess.run([RUNTIME, "rm", "-f", name], capture_output=True)
+        subprocess.run(
+            [RUNTIME, "run", "-d", "--name", name,
+             "--label", f"{RUN_LABEL}=eeeeeeee55",
+             "--label", f"{PID_LABEL}={os.getpid()}",
+             IMAGE, "sleep", "60"],
+            capture_output=True,
+        )
+        try:
+            assert not any(r == "eeeeeeee55" for _, r in orphaned_sidecars(RUNTIME))
+        finally:
+            subprocess.run([RUNTIME, "rm", "-f", name], capture_output=True)
