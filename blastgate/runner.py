@@ -429,6 +429,17 @@ def run_sandboxed(
         # the isolation boundary; the boundary is the runtime itself.
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
+        # Run as the invoking user, not root.
+        #
+        # --cap-drop ALL removes CAP_DAC_OVERRIDE, so a root process in the
+        # container cannot write to a bind mount owned by someone else. On
+        # macOS the runtime's filesystem sharing hides that by mapping
+        # ownership; on Linux it fails outright, which is what CI found.
+        #
+        # Matching the host uid also stops an install leaving root-owned files
+        # in the user's project, which is a real annoyance on Linux and not
+        # something a sandbox should introduce.
+        "--user", f"{os.getuid()}:{os.getgid()}",
     ]
 
     if entrypoint is not None:
@@ -875,6 +886,11 @@ class ProxySidecar:
             "--mount", f"type=bind,source={self.audit_path.parent},target=/audit",
             "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
+            # Same reason as the install container: without CAP_DAC_OVERRIDE a
+            # root process cannot write to a mount owned by the host user, so
+            # the audit log would fail to be written on Linux.
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--env", "HOME=/tmp",
             self.image,
             "proxy", self.ecosystem,
             "--port", str(PROXY_PORT),
@@ -941,6 +957,17 @@ class ProxySidecar:
 
 PROXY_URL = f"http://{PROXY_ALIAS}:{PROXY_PORT}"
 
+# A numeric uid with no /etc/passwd entry has no usable home, and every package
+# manager wants somewhere to put a cache. /tmp is writable in every image used
+# here and is discarded with the container.
+SANDBOX_HOME_ENV = {
+    "HOME": "/tmp",
+    "npm_config_cache": "/tmp/.npm",
+    "XDG_CACHE_HOME": "/tmp/.cache",
+    "PIP_CACHE_DIR": "/tmp/.pip",
+    "CARGO_HOME": "/tmp/.cargo",
+}
+
 PROXY_ENV = {
     "HTTP_PROXY": PROXY_URL,
     "HTTPS_PROXY": PROXY_URL,
@@ -974,13 +1001,18 @@ def run_install(
     Every failure path raises rather than falling back. There is no branch here
     that runs the command without the enforcement point in place.
     """
-    runtime = runtime or detect_runtime()
+    # Pure checks first, before anything probes the environment. A machine with
+    # no container runtime would otherwise report "no runtime found" for a run
+    # that was going to be refused anyway for a better reason, which is what CI
+    # on a runtime-less macOS runner found.
     project_dir = Path(project_dir).resolve()
     audit_path = Path(audit_path) if audit_path else default_audit_path(project_dir)
     anchor_path = Path(anchor_path) if anchor_path else default_anchor_path(project_dir)
 
     assert_audit_log_unreachable(audit_path, project_dir)
     assert_anchor_store_unreachable(anchor_path, audit_path, project_dir)
+
+    runtime = runtime or detect_runtime()
 
     explicit_image = image is not None
     enabled_conditions = set(enabled_conditions or ())
@@ -1042,6 +1074,8 @@ def run_install(
 
             env = dict(strip_environment(host_env if host_env is not None else os.environ).passed)
             env.update(PROXY_ENV)
+            env.update(SANDBOX_HOME_ENV)
+            env.update(SANDBOX_HOME_ENV)
 
             extra_mounts: List[Tuple[Path, str, bool]] = []
             if dependencies:
@@ -1116,6 +1150,7 @@ def resolve_git_dependencies(
 
     policy = load_policy(resolve_policy_for(ecosystem))
     env = dict(PROXY_ENV)
+    env.update(SANDBOX_HOME_ENV)
     # Nothing to authenticate with. Any credential prompt is a hang, not a
     # login, so fail instead of waiting.
     env["GIT_TERMINAL_PROMPT"] = "0"
