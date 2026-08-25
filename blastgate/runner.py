@@ -43,6 +43,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
@@ -489,8 +490,8 @@ def default_image_for(ecosystem: str) -> str:
 
 
 def install_dockerfile_for(ecosystem: str, context: Optional[Path] = None) -> Path:
-    context = Path(context) if context else _repo_root()
-    return context / "docker" / f"{ecosystem}-git.Dockerfile"
+    root = Path(context) if context else package_dir()
+    return root / "docker" / f"{ecosystem}-git.Dockerfile"
 
 
 def install_image_tag(ecosystem: str = "npm", context: Optional[Path] = None) -> str:
@@ -507,17 +508,19 @@ def ensure_install_image(
     Only used when a project declares git dependencies. A project without them
     installs in the plain image and never gets a git binary it has no use for.
     """
-    context = Path(context) if context else _repo_root()
-    dockerfile = install_dockerfile_for(ecosystem, context)
+    root = Path(context) if context else package_dir()
+    dockerfile = install_dockerfile_for(ecosystem, root)
     if not dockerfile.is_file():
         raise RunnerError(f"install Dockerfile not found at {dockerfile}")
-    image = install_image_tag(ecosystem, context)
+    image = install_image_tag(ecosystem, root)
     if _run([runtime, "image", "inspect", image]).returncode == 0:
         return image
-    result = _run(
-        [runtime, "build", "-q", "-t", image, "-f", str(dockerfile), str(context)],
-        timeout=600,
-    )
+    # These Dockerfiles copy nothing, so an empty context keeps the build tiny.
+    with _build_context(include_package=False) as build_root:
+        result = _run(
+            [runtime, "build", "-q", "-t", image, "-f", str(dockerfile), str(build_root)],
+            timeout=600,
+        )
     if result.returncode != 0:
         raise RunnerError(f"failed to build install image: {result.stderr.strip()}")
     return image
@@ -604,8 +607,36 @@ def default_audit_path(project_dir: Path) -> Path:
     return Path.home() / ".blastgate" / "audit" / f"{project_dir.name}-{digest}.log"
 
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parent.parent
+def package_dir() -> Path:
+    """Where the code, the allowlists and the Dockerfiles all live.
+
+    Replaces a repo-root heuristic that resolved to site-packages once
+    installed, which would have handed Docker the entire environment as a build
+    context.
+    """
+    return Path(__file__).resolve().parent
+
+
+def dockerfile_path(name: str) -> Path:
+    return package_dir() / "docker" / name
+
+
+@contextmanager
+def _build_context(include_package: bool):
+    """A minimal directory to build from.
+
+    The context is assembled rather than pointed at, because the only sensible
+    place to point once installed is site-packages, and shipping that to the
+    daemon would be both enormous and full of unrelated code.
+    """
+    with tempfile.TemporaryDirectory(prefix="blastgate-build-") as tmp:
+        root = Path(tmp)
+        if include_package:
+            shutil.copytree(
+                package_dir(), root / "blastgate",
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "docker"),
+            )
+        yield root
 
 
 def proxy_image_tag(context: Optional[Path] = None) -> str:
@@ -617,12 +648,12 @@ def proxy_image_tag(context: Optional[Path] = None) -> str:
     invisible. Deriving the tag from the sources means changing a policy
     changes the tag, and a tag that does not exist gets built.
     """
-    context = Path(context) if context else _repo_root()
+    root = Path(context) if context else package_dir()
     digest = hashlib.sha256()
     sources = sorted(
-        list((context / "blastgate").glob("*.py"))
-        + list((context / "allowlists").glob("*.yaml"))
-        + [context / "docker" / "proxy.Dockerfile"]
+        list(root.glob("*.py"))
+        + list((root / "allowlists").glob("*.yaml"))
+        + [root / "docker" / "proxy.Dockerfile"]
     )
     for path in sources:
         if path.is_file():
@@ -636,15 +667,16 @@ def proxy_image_exists(runtime: str, image: Optional[str] = None) -> bool:
 
 
 def build_proxy_image(runtime: str, context: Optional[Path] = None) -> str:
-    context = Path(context) if context else _repo_root()
-    dockerfile = context / "docker" / "proxy.Dockerfile"
+    root = Path(context) if context else package_dir()
+    dockerfile = root / "docker" / "proxy.Dockerfile"
     if not dockerfile.is_file():
         raise RunnerError(f"proxy Dockerfile not found at {dockerfile}")
-    image = proxy_image_tag(context)
-    result = _run(
-        [runtime, "build", "-q", "-t", image, "-f", str(dockerfile), str(context)],
-        timeout=600,
-    )
+    image = proxy_image_tag(root)
+    with _build_context(include_package=True) as build_root:
+        result = _run(
+            [runtime, "build", "-q", "-t", image, "-f", str(dockerfile), str(build_root)],
+            timeout=600,
+        )
     if result.returncode != 0:
         raise RunnerError(f"failed to build proxy image: {result.stderr.strip()}")
     return image
@@ -1067,7 +1099,7 @@ def resolve_git_dependencies(
 ) -> SandboxResult:
     """Fetch declared git dependencies with no project code present.
 
-    Runs under allowlists/npm-resolve.yaml, where forges are reachable and the
+    Runs under blastgate/allowlists/npm-resolve.yaml, where forges are reachable and the
     registry is not. The project directory is deliberately NOT mounted: this
     phase needs the manifest's conclusions, not its contents, and mounting it
     would put attacker-influenced files next to the one process in the design

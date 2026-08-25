@@ -328,13 +328,15 @@ class Policy:
 
 
 def _get_default_allowlists_dir() -> Path:
-    # Look in the allowlists directory relative to project root or package
-    pkg_dir = Path(__file__).resolve().parent
-    repo_root = pkg_dir.parent
-    allowlists_in_repo = repo_root / "allowlists"
-    if allowlists_in_repo.is_dir():
-        return allowlists_in_repo
-    return pkg_dir / "allowlists"
+    """Allowlists ship inside the package.
+
+    They used to live at the repository root, which worked in a checkout and
+    not at all once installed: the wheel contained the modules and nothing
+    else, so `pip install blastgate` produced something that could not load a
+    single policy. Keeping them in the package means the source tree and an
+    installed copy resolve the same path.
+    """
+    return Path(__file__).resolve().parent / "allowlists"
 
 
 def load_policy(ecosystem: str, allowlists_dir: Optional[Path] = None) -> Policy:

@@ -44,7 +44,7 @@ class ResolveError(BlastgateError):
 GIT_CACHE_DIR = Path.home() / ".blastgate" / "git-cache"
 
 # Hosts a declared dependency may be fetched from during resolution. Kept in
-# step with allowlists/npm-resolve.yaml; policy is still the decider, this is
+# step with blastgate/allowlists/npm-resolve.yaml; policy is still the decider, this is
 # only used to reject a spec early with a clearer message.
 RESOLVABLE_FORGES = frozenset({"github.com", "gitlab.com", "bitbucket.org"})
 
@@ -178,7 +178,7 @@ def parse_git_spec(name: str, spec: str) -> Optional[GitDependency]:
             if host not in RESOLVABLE_FORGES:
                 raise UnresolvableDependencyError(
                     f"dependency {name!r} points at {host}, which is not a "
-                    f"resolvable forge. Add it to allowlists/npm-resolve.yaml "
+                    f"resolvable forge. Add it to blastgate/allowlists/npm-resolve.yaml "
                     f"deliberately, or vendor the dependency."
                 )
             return GitDependency(
@@ -392,7 +392,7 @@ def parse_pip_requirement(line: str) -> Optional[GitDependency]:
     if host not in RESOLVABLE_FORGES:
         raise UnresolvableDependencyError(
             f"requirement {line!r} points at {host}, which is not a resolvable "
-            f"forge. Add it to allowlists/pypi-resolve.yaml deliberately, or "
+            f"forge. Add it to blastgate/allowlists/pypi-resolve.yaml deliberately, or "
             f"vendor the dependency."
         )
 
@@ -470,7 +470,7 @@ def parse_cargo_source(name: str, source: str) -> Optional[GitDependency]:
     if host not in RESOLVABLE_FORGES:
         raise UnresolvableDependencyError(
             f"dependency {name!r} points at {host}, which is not a resolvable "
-            f"forge. Add it to allowlists/cargo-resolve.yaml deliberately, or "
+            f"forge. Add it to blastgate/allowlists/cargo-resolve.yaml deliberately, or "
             f"vendor the dependency."
         )
 

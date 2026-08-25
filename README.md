@@ -185,7 +185,7 @@ your stolen token to an attacker's.
 
 So the forge is not in the install's allowlist at all. Declared git dependencies
 are fetched first, by a separate phase running under
-[`allowlists/npm-resolve.yaml`](allowlists/npm-resolve.yaml), where forges are
+[`blastgate/allowlists/npm-resolve.yaml`](blastgate/allowlists/npm-resolve.yaml), where forges are
 reachable, the registry is not, and no package lifecycle script executes. The
 install then reads them from a read-only local mirror.
 
@@ -241,9 +241,15 @@ Anchoring is not provenance. It raises the bar from writing one file to writing
 two consistently. An attacker with write access to both stores forges both, and
 that limit is asserted by a test so it cannot be quietly assumed closed.
 
-## Run an install
+## Install
 
-Requires Docker or Podman.
+```bash
+pip install blastgate
+```
+
+Requires Docker or Podman, and Python 3.10+.
+
+## Run an install
 
 ```bash
 blast run npm -- npm ci
@@ -267,11 +273,7 @@ produce a refusal, never an unsandboxed install.
 
 ## Try the policy engine
 
-Requires Python 3.10+. No Docker, no containers, nothing to configure.
-
-```bash
-pip install -e .
-```
+No Docker, no containers, nothing to configure.
 
 ```bash
 blast check npm registry.npmjs.org
@@ -309,7 +311,7 @@ ALLOW github.com (matched: conditional:github.com) - Direct git repository depen
 ```
 
 Exit code is 0 for allow, 1 for deny, 2 for an error. Allowlists ship in-repo
-under [`allowlists/`](allowlists/) — a remote fetch would itself be a supply
+under [`blastgate/allowlists/`](blastgate/allowlists/) — a remote fetch would itself be a supply
 chain dependency — and every entry carries a reason or it is rejected at load.
 
 ## What it does not defend against

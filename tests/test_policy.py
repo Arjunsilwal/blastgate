@@ -17,7 +17,7 @@ from blastgate.cli import main as cli_main
 
 @pytest.fixture
 def allowlists_dir():
-    return Path(__file__).parent.parent / "allowlists"
+    return Path(__file__).parent.parent / "blastgate" / "allowlists"
 
 
 @pytest.fixture

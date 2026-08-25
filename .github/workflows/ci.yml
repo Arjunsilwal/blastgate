@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Linux runners have a working Docker daemon, so this is the only job that
+  # exercises the controls rather than the pure functions around them.
+  linux:
+    name: linux / docker / py${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]" build
+      - name: Confirm a container runtime is present
+        # The isolation tests skip themselves without one. A silent skip here
+        # would turn the only job that proves anything into a no-op.
+        run: docker version --format '{{.Server.Version}}'
+      - name: Test
+        run: pytest -q -p no:randomly
+      - name: Fail if the runtime tests were skipped
+        run: |
+          pytest -q -p no:randomly tests/test_topology.py --collect-only >/dev/null
+          pytest -p no:randomly tests/test_topology.py -q 2>&1 | tee /tmp/topology.txt
+          grep -qE "[0-9]+ passed" /tmp/topology.txt
+          if grep -q "no container runtime available" /tmp/topology.txt; then
+            echo "::error::topology tests skipped; the sandbox was never exercised"
+            exit 1
+          fi
+
+  podman:
+    name: linux / podman
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+          podman version
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+      - name: Test with podman as the only runtime
+        # detect_runtime prefers docker, so hide it to prove podman works.
+        run: |
+          sudo mv "$(command -v docker)" /usr/local/bin/docker.disabled || true
+          pytest -q -p no:randomly
+
+  # macOS runners have no Docker daemon, so this proves the pure layers build
+  # and pass there. It deliberately does not claim to test isolation.
+  macos:
+    name: macos / no runtime
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+      - name: Test
+        run: pytest -q -p no:randomly
+
+  package:
+    name: wheel is installable and complete
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          twine check dist/*
+      - name: Install the wheel somewhere with no source tree
+        run: |
+          python -m venv /tmp/probe
+          /tmp/probe/bin/pip install dist/*.whl
+          cd /tmp
+          # PYTHONSAFEPATH keeps the checkout off sys.path, so this can only
+          # pass if the allowlists really shipped inside the wheel.
+          PYTHONSAFEPATH=1 /tmp/probe/bin/blast check npm registry.npmjs.org
+          PYTHONSAFEPATH=1 /tmp/probe/bin/blast check pypi files.pythonhosted.org
+          PYTHONSAFEPATH=1 /tmp/probe/bin/blast check cargo static.crates.io
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

@@ -8,8 +8,8 @@ FROM python:3.12-alpine
 RUN pip install --no-cache-dir pyyaml==6.0.2
 
 WORKDIR /app
+# Allowlists travel inside the package, so one COPY brings both.
 COPY blastgate /app/blastgate
-COPY allowlists /app/allowlists
 
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1

@@ -267,7 +267,7 @@ def main(args: Optional[List[str]] = None) -> int:
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
         sys.stdout.write(
-            f"\nbh: egress decisions recorded in {audit_path}\n"
+            f"\nblast: egress decisions recorded in {audit_path}\n"
             f"    review with: blast audit {audit_path}\n"
         )
         return result.exit_code

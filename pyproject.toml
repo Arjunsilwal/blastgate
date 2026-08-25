@@ -1,13 +1,27 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "blastgate"
 version = "0.1.0"
-description = "Egress control and isolation for package managers"
+description = "Run package installs with no credentials available and no network egress except an explicit allowlist"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["supply-chain", "security", "sandbox", "npm", "pypi", "cargo", "egress"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: Software Development :: Build Tools",
+]
 dependencies = [
     "pyyaml>=6.0",
     # Cargo manifests and lockfiles are TOML. tomllib is stdlib from 3.11; this
@@ -21,8 +35,20 @@ test = [
     "pytest-asyncio>=0.23",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Arjunsilwal/blastgate"
+Source = "https://github.com/Arjunsilwal/blastgate"
+"Threat model" = "https://github.com/Arjunsilwal/blastgate/blob/main/docs/threat-model.md"
+Changelog = "https://github.com/Arjunsilwal/blastgate/blob/main/CHANGELOG.md"
+
 [project.scripts]
 blast = "blastgate.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["blastgate*"]
+
+# The allowlists and Dockerfiles are not extras, they are the product. Without
+# them an installed copy cannot load a policy or build its own proxy, which is
+# exactly what the first wheel did.
+[tool.setuptools.package-data]
+blastgate = ["allowlists/*.yaml", "docker/*.Dockerfile"]
