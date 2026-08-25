@@ -118,7 +118,7 @@ python scripts/attack_report.py --write
 ```
 
 <!-- corpus:begin -->
-**13 of 15 scenarios prevented (87%).**
+**14 of 16 scenarios prevented (88%).**
 
 | Scenario | Link | Expected | Result |
 | --- | --- | --- | --- |
@@ -135,6 +135,7 @@ python scripts/attack_report.py --write
 | `fetch-phase-runs-no-lifecycle-scripts` | 3 | denied | prevented |
 | `git-dependency-still-installs` | 0 | allowed | allowed |
 | `harvest-host-credential-files` | 4 | denied | prevented |
+| `registry-token-theft-from-the-sandbox` | 4 | denied | prevented |
 | `registry-traffic-still-works` | 0 | allowed | allowed |
 | `shai-hulud-webhook-exfiltration` | 5 | denied | prevented |
 
@@ -217,6 +218,38 @@ install, and a registry accepts writes — that residual is the corpus scenario
 `exfil-via-registry-during-install`, counted as a failure below. And an
 ecosystem added later has no parser until one is written, so it keeps the older
 arrangement and `blast run` warns when that path is taken.
+
+### Private registries: the token never enters the sandbox
+
+Installing from a private registry normally means a token in `~/.npmrc`,
+readable by every postinstall script that runs. That is not a hypothetical
+weakness — it is what the Shai-Hulud worm harvested, from that exact file,
+across several hundred packages.
+
+```bash
+echo -n "$NPM_TOKEN" | blast creds add registry.internal.example.com
+blast run npm -- npm ci
+```
+
+The credential stays on the host. The sandbox talks plain HTTP to the broker
+over a network with no gateway, and the broker attaches the `Authorization`
+header on the upstream leg. A payload that reads every environment variable and
+every readable file inside the sandbox finds nothing — which is the corpus
+scenario `registry-token-theft-from-the-sandbox`, not a claim.
+
+The secret is read from **stdin, never an argument**, because arguments are
+visible in `ps`. `blast creds list` prints hosts and withholds secrets. The
+store is mode 0600 and is refused outright if anything wider.
+
+**The broker forwards reads only.** It is authenticated, so without that a
+payload could publish through it — which is precisely how Shai-Hulud spread,
+republishing every package the stolen token could reach. `PUT`, `POST`,
+`DELETE` and `PATCH` get 405.
+
+This is not TLS interception. There is no CA, nothing to distribute or expire,
+and no TLS parser in the path of attacker-controlled bytes. What a payload
+retains is the ability to *make* authenticated reads during the install; what
+it cannot do is take the token anywhere.
 
 The audit log is written to a directory mounted into the proxy container and
 nowhere else, so the sandbox cannot read or delete it. Pointing `--audit` inside

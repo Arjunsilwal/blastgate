@@ -520,3 +520,146 @@ class TestConcurrency:
                     )
         finally:
             shutil.rmtree(project, ignore_errors=True)
+
+
+@pytest.mark.skipif(RUNTIME is None, reason="no container runtime available")
+class TestCredentialBrokering:
+    """An authenticated install with no credential inside the sandbox.
+
+    The registry here is the real public one, which accepts any bearer token on
+    a public read. So this proves the plumbing and, more importantly, that the
+    secret never reaches the sandbox. It does not prove a private registry
+    accepts the header, which needs a private registry to test against and is
+    noted as untested in the threat model.
+    """
+
+    SENTINEL = "sentinel-token-a1b2c3d4e5f6-do-not-leak"
+
+    @pytest.fixture
+    def credentialled(self, tmp_path):
+        from blastgate.credentials import CredentialStore
+
+        store = CredentialStore(tmp_path / "credentials.json")
+        store.put("registry.npmjs.org", self.SENTINEL)
+        return store
+
+    def _project(self):
+        import json as _json
+
+        base = Path.home() / ".blastgate-tests"
+        base.mkdir(parents=True, exist_ok=True)
+        path = Path(tempfile.mkdtemp(dir=base))
+        (path / "package.json").write_text(_json.dumps({
+            "name": "brokered", "version": "1.0.0",
+            "dependencies": {"is-odd": "3.0.1"},
+        }))
+        return path
+
+    def test_an_install_runs_through_the_broker(self, credentialled):
+        from blastgate.runner import default_anchor_path
+
+        project = self._project()
+        audit = default_audit_path(project)
+        for artefact in (audit, default_anchor_path(project)):
+            if artefact.exists():
+                artefact.unlink()
+        try:
+            # The broker fetches from the real registry, so this one test
+            # depends on the public network. Retried once: a transient upstream
+            # failure here says nothing about brokering, and a functional test
+            # that fails on someone else's bad minute gets ignored.
+            for attempt in (1, 2):
+                result = run_install(
+                    policy=load_policy("npm"),
+                    command=["npm", "install", "--no-audit", "--no-fund"],
+                    project_dir=project, audit_path=audit, host_env={},
+                    credential_store=credentialled, timeout=600,
+                )
+                if result.exit_code == 0:
+                    break
+            assert result.exit_code == 0, result.stderr[-800:]
+            assert (project / "node_modules" / "is-odd").is_dir()
+            # The broker recorded the reads it forwarded.
+            entries = AuditLog(audit).read_all()
+            assert any(e.ecosystem == "broker" for e in entries), \
+                [e.ecosystem for e in entries]
+        finally:
+            shutil.rmtree(project, ignore_errors=True)
+            for artefact in (audit, default_anchor_path(project)):
+                if artefact.exists():
+                    artefact.unlink()
+
+    def test_the_secret_is_nowhere_in_the_sandbox(self, credentialled):
+        # The whole reason brokering exists. A payload that reads every
+        # variable and every readable file finds nothing, where the status quo
+        # leaves the token in ~/.npmrc for any postinstall script.
+        project = self._project()
+        audit = default_audit_path(project)
+        probe = (
+            "import os, subprocess\n"
+            f"needle = {self.SENTINEL!r}\n"
+            "hits = [k for k, v in os.environ.items() if needle in v or needle in k]\n"
+            # Not /proc: recursive grep there blocks on synthetic files and
+            # the probe never returns.
+            # The places a credential could actually land: the project mount,
+            # HOME, and the usual config locations. Not /usr/local, which is
+            # image content and takes long enough to walk that the probe times
+            # out before proving anything.
+            "found = subprocess.run(\n"
+            "    ['grep', '-rl', '-s', needle, '/workspace', '/tmp', '/etc', '/root'],\n"
+            "    capture_output=True, text=True, timeout=120).stdout.split()\n"
+            "print('ENV_HITS', hits)\n"
+            "print('FILE_HITS', found)\n"
+        )
+        try:
+            result = run_install(
+                policy=load_policy("npm"), command=["python", "-c", probe],
+                project_dir=project, image="python:3.12-alpine",
+                audit_path=audit, host_env={},
+                credential_store=credentialled, timeout=300,
+            )
+            assert "ENV_HITS []" in result.stdout, result.stdout
+            assert "FILE_HITS []" in result.stdout, result.stdout
+        finally:
+            shutil.rmtree(project, ignore_errors=True)
+            if audit.exists():
+                audit.unlink()
+
+    def test_the_client_is_pointed_at_the_broker_not_the_registry(self, credentialled):
+        project = self._project()
+        audit = default_audit_path(project)
+        try:
+            result = run_install(
+                policy=load_policy("npm"),
+                command=["sh", "-c", "echo $npm_config_registry"],
+                project_dir=project, image="python:3.12-alpine",
+                audit_path=audit, host_env={},
+                credential_store=credentialled, timeout=300,
+            )
+            assert "blastgate-proxy:3129" in result.stdout, result.stdout
+        finally:
+            shutil.rmtree(project, ignore_errors=True)
+            if audit.exists():
+                audit.unlink()
+
+    def test_without_a_credential_nothing_changes(self, tmp_path):
+        # Brokering is opt-in. An empty store must leave the install talking
+        # straight to the registry through the CONNECT proxy as before.
+        from blastgate.credentials import CredentialStore
+
+        project = self._project()
+        audit = default_audit_path(project)
+        try:
+            result = run_install(
+                policy=load_policy("npm"),
+                command=["sh", "-c", "echo [$npm_config_registry]"],
+                project_dir=project, image="python:3.12-alpine",
+                audit_path=audit, host_env={},
+                credential_store=CredentialStore(tmp_path / "empty.json"),
+                timeout=300,
+            )
+            assert "[]" in result.stdout, result.stdout
+        finally:
+            shutil.rmtree(project, ignore_errors=True)
+            if audit.exists():
+                audit.unlink()

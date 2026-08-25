@@ -289,6 +289,9 @@ def run_proxy_server(
     audit_path: Optional["Path"] = None,
     enabled_conditions: Optional[Set[str]] = None,
     host: str = "0.0.0.0",
+    broker_host: Optional[str] = None,
+    broker_credential_file: Optional["Path"] = None,
+    broker_origin: Optional[str] = None,
 ) -> None:
     """Blocking entrypoint used inside the proxy container.
 
@@ -298,6 +301,20 @@ def run_proxy_server(
     way anywhere else would expose an open proxy.
     """
     audit_log = AuditLog(audit_path) if audit_path is not None else None
+
+    if broker_host and broker_credential_file:
+        # Read from a mounted file rather than an argument or an environment
+        # variable, both of which `docker inspect` will happily print.
+        header = Path(broker_credential_file).read_text(encoding="utf-8").strip()
+        if not header:
+            raise ProxyError("broker credential file is empty")
+        start_broker(
+            upstream_host=broker_host,
+            auth_header=header,
+            local_origin=broker_origin or f"http://blastgate-proxy:{BROKER_PORT}",
+            audit_log=audit_log,
+        )
+
     proxy = EgressProxy(
         policy,
         audit_log=audit_log,
@@ -309,3 +326,160 @@ def run_proxy_server(
         asyncio.run(proxy.serve_forever())
     except KeyboardInterrupt:
         pass
+
+
+# --- Credential broker ------------------------------------------------------
+#
+# An authenticated install with no credential in the sandbox.
+#
+# The install container talks plain HTTP to this broker over the internal
+# network, and the broker makes the real request upstream over TLS with the
+# Authorization header attached. The token exists only in this process. A
+# payload that reads every file and every environment variable inside the
+# sandbox finds nothing, which is a straight improvement on the status quo,
+# where the token sits in ~/.npmrc for any postinstall script to read.
+#
+# Plain HTTP inside is not a compromise. That network has two members and no
+# gateway, and the payload already sees the package bodies - they are its own
+# packages. The only thing it must not see is the credential, and that is added
+# on the upstream leg.
+#
+# This is deliberately NOT TLS interception. There is no CA, no certificate to
+# distribute or expire, and no TLS parser in the path of attacker-influenced
+# bytes. The v1 decision to reject interception stands.
+
+import http.server
+import socketserver
+import threading
+import urllib.error
+import urllib.request
+
+BROKER_PORT = 3129
+
+# Only reads are forwarded.
+#
+# The broker is authenticated, so without this a payload could publish through
+# it - which is exactly Shai-Hulud's propagation step, republishing every
+# package the stolen token could reach. It cannot steal the token here, and it
+# cannot use the broker to do the thing the token was worth stealing for.
+BROKER_METHODS = frozenset({"GET", "HEAD"})
+
+_HOP_BY_HOP = frozenset({
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade", "content-encoding",
+    "content-length",
+})
+
+
+class BrokerHandler(http.server.BaseHTTPRequestHandler):
+    """Forwards a read to one upstream host, with credentials attached."""
+
+    upstream_host = ""
+    auth_header = ""
+    local_origin = ""
+    audit_log = None
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        # Silent by default. Request lines can carry package names, and the
+        # audit log is the place where decisions are recorded deliberately.
+        pass
+
+    def _record(self, allowed: bool, reason: str) -> None:
+        if self.audit_log is None:
+            return
+        self.audit_log.append(
+            ecosystem="broker", host=self.upstream_host, allowed=allowed,
+            rule="broker:read-only" if allowed else None, reason=reason,
+        )
+
+    def do_GET(self):
+        self._forward(body=True)
+
+    def do_HEAD(self):
+        self._forward(body=False)
+
+    def _reject(self):
+        self._record(False, f"{self.command} refused: the broker forwards reads only")
+        self.send_response(405)
+        self.send_header("Allow", "GET, HEAD")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    do_PUT = do_POST = do_DELETE = do_PATCH = _reject
+
+    def _forward(self, body: bool):
+        url = f"https://{self.upstream_host}{self.path}"
+        request = urllib.request.Request(url, method=self.command)
+        request.add_header("Authorization", self.auth_header)
+        for name in ("accept", "user-agent", "npm-auth-type"):
+            value = self.headers.get(name)
+            if value:
+                request.add_header(name, value)
+        # Ask for it uncompressed. The metadata has to be rewritten before it
+        # reaches the client, and forwarding the client's accept-encoding meant
+        # handing back gzip bytes with the content-encoding header stripped -
+        # which the client then tried to parse as JSON.
+        request.add_header("Accept-Encoding", "identity")
+
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                payload = response.read() if body else b""
+                status, headers = response.status, response.headers
+        except urllib.error.HTTPError as e:
+            payload = e.read() if body else b""
+            status, headers = e.code, e.headers
+        except Exception as e:                      # noqa: BLE001 - reported, not raised
+            self._record(False, f"upstream failed: {type(e).__name__}")
+            self.send_response(502)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        # A registry answers with absolute URLs to itself, so metadata would
+        # send the client straight back to the upstream host - unauthenticated,
+        # and for a private registry, refused. Point them at this broker.
+        content_type = (headers.get("content-type") or "").lower()
+        if payload and "json" in content_type:
+            payload = payload.replace(
+                f"https://{self.upstream_host}/".encode(),
+                f"{self.local_origin}/".encode(),
+            )
+
+        self._record(True, f"{self.command} {self.path[:80]} -> {status}")
+        self.send_response(status)
+        for name, value in headers.items():
+            if name.lower() not in _HOP_BY_HOP:
+                self.send_header(name, value)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        if body and payload:
+            self.wfile.write(payload)
+
+
+class _ThreadedHTTP(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def make_broker(
+    upstream_host: str,
+    auth_header: str,
+    local_origin: str,
+    audit_log=None,
+    host: str = "0.0.0.0",
+    port: int = BROKER_PORT,
+) -> _ThreadedHTTP:
+    handler = type("BoundBrokerHandler", (BrokerHandler,), {
+        "upstream_host": upstream_host,
+        "auth_header": auth_header,
+        "local_origin": local_origin,
+        "audit_log": audit_log,
+    })
+    return _ThreadedHTTP((host, port), handler)
+
+
+def start_broker(*args, **kwargs) -> _ThreadedHTTP:
+    server = make_broker(*args, **kwargs)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server

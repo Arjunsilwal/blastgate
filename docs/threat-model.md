@@ -14,7 +14,7 @@ wired to any package manager. **Nothing in section 6 constitutes protection of a
 real install today.** See section 7 for the precise gap between design and
 implementation.
 
-Document version: 16. Last reviewed: 2026-08-22.
+Document version: 17. Last reviewed: 2026-08-22.
 
 **Design note, recorded because it departs from the v0 plan.** The plan specified
 environment variables "filtered by shape (prefix, and any name containing TOKEN,
@@ -225,6 +225,10 @@ connectivity would satisfy every isolation assertion while proving nothing.
 | The published pass rate matches what the corpus scores *(constrains blastgate)* | README is generated, and a test fails if it drifts | `TestCorpusResults::test_the_published_number_matches_the_corpus` |
 | A denied hostname is never resolved | Policy is evaluated and refused before `open_connection` | `test_proxy.py::TestResolutionOrder::test_a_denied_host_is_never_resolved` |
 | DNS-tunnelled exfiltration does not leave the sandbox *(runtime)* | No resolver inside; the proxy resolves only allowed names | `dns-tunnelled-exfiltration` |
+| A registry credential is never present in the sandbox *(runtime)* | The proxy attaches it upstream; the install holds nothing | `registry-token-theft-from-the-sandbox`, `TestCredentialBrokering::test_the_secret_is_nowhere_in_the_sandbox` |
+| The broker refuses writes | Only GET and HEAD are forwarded | `test_credentials.py::TestBroker::test_writes_are_refused` |
+| The credential store is refused if others can read it *(constrains blastgate)* | Mode is checked before the file is read | `TestStore::test_a_readable_store_is_refused_not_read` |
+| A secret is never taken from the command line *(constrains blastgate)* | `blast creds add` reads stdin, because argv is visible in ps | `blastgate/cli.py` |
 | Truncating an audit log is detected | Anchor records head hash and entry count | `test_audit.py::TestDisclosedLimits::test_truncating_the_tail_IS_detected_against_an_anchor` |
 | Truncating a log written by a real run is detected *(runtime)* | Anchor written by the host runner after the sidecar stops | `test_end_to_end.py::TestAnchoring::test_truncating_the_log_after_a_run_is_detected` |
 | Removing a whole run's anchor is detected | Anchors are chained across runs | `TestAnchorStore::test_removing_a_whole_run_breaks_the_anchor_chain` |
@@ -393,6 +397,36 @@ to read it and not find a gap that was left undisclosed.
   application when it later runs.
 - **Anything outside an install.** A malicious package that does nothing at
   install time and attacks in production is entirely out of scope.
+
+### 8.4 Surface introduced by credential brokering
+
+- **The proxy now holds a secret.** It was a chokepoint; it is now also a target
+  worth attacking. The credential reaches it through a file mounted only into
+  that container, because `docker inspect` prints both arguments and
+  environment variables.
+- **A payload can still make authenticated requests through the broker.** It
+  cannot steal the token, use it elsewhere, or keep it after the run. It can
+  fetch private packages during the install. Reads only: the broker refuses
+  PUT, POST, DELETE and PATCH, so it cannot publish - which is the step that
+  turned Shai-Hulud from a theft into a worm.
+- **The sandbox talks plain HTTP to the broker.** That network has two members
+  and no gateway, and the payload already sees the package bodies. What it must
+  not see is the credential, and that is added on the upstream leg. No TLS is
+  intercepted anywhere; the v1 rejection of interception stands.
+- **Registry metadata is rewritten in flight.** Absolute URLs pointing at the
+  upstream host are replaced so the client comes back to the broker. That is a
+  transformation applied to a response body, and a registry that encodes URLs
+  in some other form would not be rewritten and would fail rather than leak.
+- **The store is a file, not an OS keychain.** Mode 0600, and refused if it is
+  wider. That defends against the install, which is this project's threat. It
+  does not defend against another process running as the same user on the host.
+- **Only npm and pypi are wired for brokering.** cargo needs registry source
+  replacement rather than an index URL, and is not done. An ecosystem with no
+  entry gets no brokering rather than a setting that silently does nothing.
+- **Untested against a real private registry.** The end-to-end test uses the
+  public registry, which accepts any bearer token on a public read. It proves
+  the credential never enters the sandbox; it does not prove Artifactory or
+  Nexus accept the header shape.
 
 ### 8.3 Surface introduced by two-phase resolution
 

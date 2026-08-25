@@ -6,6 +6,9 @@ about the threat model, because that is the part worth reading.
 ## Unreleased
 
 ### Added
+- **Credential brokering.** `blast creds` stores a registry credential on the
+  host; the proxy attaches it to upstream requests so the install never holds
+  it. Reads only, so a payload cannot publish through the broker. npm and pypi.
 - Concurrent runs. Each run gets its own internal network, so installs against
   different projects no longer collide. Previously the second run was refused.
 - Orphaned sidecars are reaped. Containers record the pid that started them, so

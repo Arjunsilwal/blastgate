@@ -32,6 +32,7 @@ payload has no reason to honour them. What stops it is that there is no route to
 find. See tests/test_end_to_end.py.
 """
 
+import contextlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 import fcntl
@@ -50,6 +51,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from blastgate import BlastgateError
 from blastgate.audit import AnchorStore, AuditLog
+from blastgate.proxy import BROKER_PORT
 from blastgate.resolve import (
     CACHE_MOUNT,
     GIT_CACHE_DIR,
@@ -856,7 +858,11 @@ class ProxySidecar:
         image: Optional[str] = None,
         network: Optional[str] = None,
         run_id: Optional[str] = None,
+        broker_host: Optional[str] = None,
+        broker_secret_dir: Optional[Path] = None,
     ) -> None:
+        self.broker_host = broker_host
+        self.broker_secret_dir = Path(broker_secret_dir) if broker_secret_dir else None
         self.run_id = run_id or uuid.uuid4().hex
         self.network = network or INTERNAL_NETWORK
         self.image = image or proxy_image_tag()
@@ -897,6 +903,20 @@ class ProxySidecar:
             "--bind", "0.0.0.0",
             "--audit", f"/audit/{self.audit_path.name}",
         ]
+        if self.broker_host and self.broker_secret_dir:
+            # Mounted read-only, and only here. The install container never
+            # gets this path, and a mount does not show its contents to
+            # `docker inspect` the way an argument or an env var would.
+            argv[argv.index(self.image):argv.index(self.image)] = [
+                "--mount",
+                f"type=bind,source={self.broker_secret_dir},target=/secrets,readonly",
+            ]
+            argv += [
+                "--broker-host", self.broker_host,
+                "--broker-credential-file", f"/secrets/{BROKER_SECRET_NAME}",
+                "--broker-origin", BROKER_ORIGIN,
+            ]
+
         for condition in sorted(self.enabled_conditions):
             argv += ["--allow", condition]
 
@@ -955,7 +975,73 @@ class ProxySidecar:
         self.stop()
 
 
+def brokerable_credential(policy, store: Optional["CredentialStore"] = None):
+    """The credential to broker for this run, if there is exactly one.
+
+    A credential only applies to a host the policy already allows. Brokering a
+    host the allowlist denies would be a way to reach it, which is backwards.
+
+    Ambiguity is refused rather than guessed at: two applicable credentials
+    means the user has an expectation this cannot infer, and picking one would
+    silently authenticate against the wrong registry.
+    """
+    from blastgate.credentials import CredentialStore as _Store
+
+    if policy.ecosystem not in BROKER_CLIENT_ENV:
+        return None
+    store = store if store is not None else _Store()
+    applicable = [c for c in store if policy.evaluate(c.host).allowed]
+    if not applicable:
+        return None
+    if len(applicable) > 1:
+        names = ", ".join(c.host for c in applicable)
+        raise RunnerError(
+            f"more than one stored credential applies to this {policy.ecosystem} "
+            f"install ({names}). Remove the ones that do not belong to this "
+            f"registry: blast creds rm <host>"
+        )
+    return applicable[0]
+
+
+SECRETS_DIR = Path.home() / ".blastgate" / "secrets"
+
+
+@contextmanager
+def broker_secret_dir(credential, run_id: str):
+    """A directory holding the Authorization value, mounted only into the proxy.
+
+    Under $HOME rather than the system temp directory. On macOS the runtime
+    runs in a VM that shares only part of the filesystem, and a bind mount from
+    /var/folders fails outright - the same constraint that already applies to
+    project directories.
+
+    Removed when the run ends, whatever the run did.
+    """
+    directory = SECRETS_DIR / run_id[:8]
+    directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    path = directory / BROKER_SECRET_NAME
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(credential.header)
+    try:
+        yield directory
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 PROXY_URL = f"http://{PROXY_ALIAS}:{PROXY_PORT}"
+BROKER_ORIGIN = f"http://{PROXY_ALIAS}:{BROKER_PORT}"
+BROKER_SECRET_NAME = "authorization"
+
+# How each package manager is pointed at the broker instead of the registry.
+# Only what has been exercised end to end appears here; an ecosystem missing
+# from this table simply does not get brokering, rather than getting a setting
+# that silently does nothing.
+BROKER_CLIENT_ENV = {
+    "npm": lambda origin: {"npm_config_registry": f"{origin}/"},
+    "pypi": lambda origin: {"PIP_INDEX_URL": f"{origin}/simple/"},
+}
 
 # A numeric uid with no /etc/passwd entry has no usable home, and every package
 # manager wants somewhere to put a cache. /tmp is writable in every image used
@@ -994,6 +1080,7 @@ def run_install(
     runtime: Optional[str] = None,
     host_env: Optional[Mapping[str, str]] = None,
     git_cache_dir: Optional[Path] = None,
+    credential_store: Optional["CredentialStore"] = None,
     timeout: int = 600,
 ) -> SandboxResult:
     """Run an install in the sandbox with the proxy as its only route out.
@@ -1075,7 +1162,6 @@ def run_install(
             env = dict(strip_environment(host_env if host_env is not None else os.environ).passed)
             env.update(PROXY_ENV)
             env.update(SANDBOX_HOME_ENV)
-            env.update(SANDBOX_HOME_ENV)
 
             extra_mounts: List[Tuple[Path, str, bool]] = []
             if dependencies:
@@ -1089,25 +1175,51 @@ def run_install(
                 # forge it is not allowed to reach.
                 env["CARGO_NET_GIT_FETCH_WITH_CLI"] = "true"
 
-            with ProxySidecar(
-                policy.ecosystem,
-                audit_path=audit_path,
-                runtime=runtime,
-                enabled_conditions=install_conditions,
-                image=image_tag,
-                network=network,
-                run_id=run_id,
-            ):
-                result = run_sandboxed(
-                    command,
-                    project_dir,
-                    image,
+            # Credential brokering. The secret goes to the proxy and nowhere
+            # near the install: the sandbox talks plain HTTP to the broker over
+            # a network with no gateway, and the broker attaches the header on
+            # the upstream leg.
+            credential = brokerable_credential(policy, credential_store)
+            broker_host = credential.host if credential else None
+
+            with contextlib.ExitStack() as stack:
+                if credential:
+                    secret_dir = stack.enter_context(
+                        broker_secret_dir(credential, run_id)
+                    )
+                    env.update(BROKER_CLIENT_ENV[policy.ecosystem](BROKER_ORIGIN))
+                    # The one NO_PROXY exemption that is not a hole. Without
+                    # it the client sends its plain-HTTP broker request to the
+                    # CONNECT proxy, which accepts only CONNECT and answers
+                    # 400. The exempted name is our own enforcement point on a
+                    # network with no gateway, so nothing external becomes
+                    # reachable by naming it.
+                    env["NO_PROXY"] = PROXY_ALIAS
+                    env["no_proxy"] = PROXY_ALIAS
+                else:
+                    secret_dir = None
+
+                with ProxySidecar(
+                    policy.ecosystem,
+                    audit_path=audit_path,
                     runtime=runtime,
-                    env=env,
+                    enabled_conditions=install_conditions,
+                    image=image_tag,
                     network=network,
-                    extra_mounts=extra_mounts,
-                    timeout=timeout,
-                )
+                    run_id=run_id,
+                    broker_host=broker_host,
+                    broker_secret_dir=secret_dir,
+                ):
+                    result = run_sandboxed(
+                        command,
+                        project_dir,
+                        image,
+                        runtime=runtime,
+                        env=env,
+                        network=network,
+                        extra_mounts=extra_mounts,
+                        timeout=timeout,
+                    )
 
             # Anchored here, on the host, after the sidecar is gone. A different
             # process from the one that wrote the log, writing to a store that process

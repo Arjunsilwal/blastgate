@@ -1,0 +1,20 @@
+id: registry-token-theft-from-the-sandbox
+title: Payload reads the registry token the install is authenticating with
+chain_link: 4
+ecosystem: npm
+source: https://unit42.paloaltonetworks.com/npm-supply-chain-attack/
+expect: denied
+requires: sandbox
+check: credential
+
+note: >
+  Shai-Hulud read .npmrc for npm tokens across several hundred packages. That
+  file is where the status quo puts a registry credential, and install-time
+  code runs as the developer, so reading it needs no vulnerability at all.
+  A stolen registry token is not ordinary data loss. It is publish rights, and
+  publishing is how the worm propagated: every package the compromised
+  maintainer controlled, republished automatically.
+  Prevented here because the install never holds the token. The proxy attaches
+  it on the upstream leg, so the sandbox authenticates without possessing
+  anything to steal. This scenario configures a real credential and then hunts
+  for it through every environment variable and every readable file.

@@ -17,6 +17,7 @@ import sys
 from typing import List, Optional
 
 from blastgate import BlastgateError
+from blastgate.credentials import CredentialError, CredentialStore
 from blastgate.audit import (
     AnchorStore,
     AuditError,
@@ -136,6 +137,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Explicitly enable a condition (e.g. --allow git-dependencies)",
     )
     proxy_parser.add_argument("--allowlists-dir", type=Path, default=None)
+    proxy_parser.add_argument(
+        "--broker-host", default=None,
+        help="Registry host to broker credentials for (used inside the sidecar)",
+    )
+    proxy_parser.add_argument(
+        "--broker-credential-file", type=Path, default=None,
+        help="File holding the Authorization header value. A file rather than "
+             "an argument or environment variable, both of which docker "
+             "inspect exposes.",
+    )
+    proxy_parser.add_argument("--broker-origin", default=None)
+
+    creds_parser = subparsers.add_parser(
+        "creds",
+        help="Manage registry credentials, which are never given to the sandbox",
+    )
+    creds_sub = creds_parser.add_subparsers(dest="creds_command", required=True)
+
+    creds_add = creds_sub.add_parser(
+        "add",
+        help="Store a credential for a registry host. The secret is read from "
+             "stdin, never from the command line, because arguments are visible "
+             "to anyone who can run ps.",
+    )
+    creds_add.add_argument("host", help="Registry hostname, e.g. registry.npmjs.org")
+    creds_add.add_argument(
+        "--scheme", default="Bearer",
+        help="Authorization scheme sent upstream (default: Bearer)",
+    )
+    creds_add.add_argument("--store", type=Path, default=None)
+
+    creds_list = creds_sub.add_parser("list", help="List hosts with a stored credential")
+    creds_list.add_argument("--store", type=Path, default=None)
+
+    creds_rm = creds_sub.add_parser("rm", help="Remove a stored credential")
+    creds_rm.add_argument("host")
+    creds_rm.add_argument("--store", type=Path, default=None)
 
     audit_parser = subparsers.add_parser(
         "audit",
@@ -207,6 +245,50 @@ def main(args: Optional[List[str]] = None) -> int:
     except SystemExit as e:
         return 2 if e.code != 0 else 0
 
+    if parsed_args.command == "creds":
+        store = CredentialStore(parsed_args.store)
+        try:
+            if parsed_args.creds_command == "add":
+                # From stdin only. A secret passed as an argument is visible in
+                # ps output and in shell history, which would make storing it
+                # carefully rather pointless.
+                if sys.stdin.isatty():
+                    sys.stderr.write(
+                        "blast: reading the secret from stdin. Paste it and press "
+                        "Ctrl-D, or pipe it in:\n"
+                        f"    echo -n $TOKEN | blast creds add {parsed_args.host}\n"
+                    )
+                secret = sys.stdin.read()
+                credential = store.put(parsed_args.host, secret, parsed_args.scheme)
+                sys.stdout.write(
+                    f"stored a {credential.scheme} credential for {credential.host}\n"
+                    f"    it is never mounted into a sandbox; the proxy attaches "
+                    f"it to upstream requests\n"
+                )
+                return 0
+
+            if parsed_args.creds_command == "list":
+                hosts = store.hosts()
+                if not hosts:
+                    sys.stdout.write("no credentials stored\n")
+                    return 0
+                for host in hosts:
+                    entry = store.get(host)
+                    sys.stdout.write(f"{host}  ({entry.scheme}, secret withheld)\n")
+                return 0
+
+            if parsed_args.creds_command == "rm":
+                removed = store.remove(parsed_args.host)
+                sys.stdout.write(
+                    f"removed {parsed_args.host}\n" if removed
+                    else f"no credential stored for {parsed_args.host}\n"
+                )
+                return 0 if removed else 1
+        except CredentialError as e:
+            sys.stderr.write(f"blast: {e}\n")
+            return 2
+        return 2
+
     if parsed_args.command == "proxy":
         try:
             policy = load_policy(
@@ -221,6 +303,9 @@ def main(args: Optional[List[str]] = None) -> int:
             audit_path=parsed_args.audit,
             enabled_conditions=set(parsed_args.allowed_conditions),
             host=parsed_args.bind,
+            broker_host=parsed_args.broker_host,
+            broker_credential_file=parsed_args.broker_credential_file,
+            broker_origin=parsed_args.broker_origin,
         )
         return 0
 

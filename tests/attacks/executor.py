@@ -241,6 +241,60 @@ def _run_dns_scenario(scenario: Scenario) -> Outcome:
             audit.unlink()
 
 
+SENTINEL = "corpus-sentinel-9f3a2b71-never-leak"
+
+
+def _run_credential_scenario(scenario: Scenario) -> Outcome:
+    """Configure a registry credential, then hunt for it inside the sandbox.
+
+    The status quo puts this token in ~/.npmrc, where any postinstall script
+    can read it - which is how Shai-Hulud harvested several hundred packages'
+    worth. Brokering means the install authenticates without ever holding it.
+    """
+    from blastgate.credentials import CredentialStore
+    from blastgate.runner import default_anchor_path
+
+    project = _scratch_project()
+    (project / "package.json").write_text(
+        json.dumps({"name": "corpus", "version": "1.0.0"}) + "\n"
+    )
+    store_dir = Path(tempfile.mkdtemp())
+    store = CredentialStore(store_dir / "credentials.json")
+    store.put("registry.npmjs.org", SENTINEL)
+
+    audit = default_audit_path(project)
+    anchors = default_anchor_path(project)
+    probe = (
+        "import os, subprocess\n"
+        f"needle = {SENTINEL!r}\n"
+        "env = [k for k, v in os.environ.items() if needle in v or needle in k]\n"
+        "files = subprocess.run(\n"
+        "    ['grep', '-rl', '-s', needle, '/workspace', '/tmp', '/etc', '/root'],\n"
+        "    capture_output=True, text=True, timeout=120).stdout.split()\n"
+        "print('LEAK' if env or files else 'CLEAN', env, files)\n"
+    )
+    try:
+        result = run_install(
+            policy=load_policy(scenario.ecosystem),
+            command=["python", "-c", probe],
+            project_dir=project, image=PROBE_IMAGE, audit_path=audit,
+            host_env={}, credential_store=store, timeout=300,
+        )
+        if "CLEAN" in result.stdout:
+            return _classify(scenario, False, "no trace of the credential in the sandbox")
+        if "LEAK" in result.stdout:
+            return _classify(scenario, True, result.stdout.strip().splitlines()[-1][:160])
+        return Outcome(scenario, NOT_RUNNABLE, result.stderr.strip()[-200:] or "probe did not run")
+    except Exception as e:
+        return Outcome(scenario, NOT_RUNNABLE, f"{type(e).__name__}: {e}")
+    finally:
+        shutil.rmtree(project, ignore_errors=True)
+        shutil.rmtree(store_dir, ignore_errors=True)
+        for artefact in (audit, anchors):
+            if artefact.exists():
+                artefact.unlink()
+
+
 def _run_audit_scenario(scenario: Scenario) -> Outcome:
     """Tamper with an audit log on the host and see whether it is caught.
 
@@ -304,6 +358,7 @@ def run_corpus(scenarios: Optional[List[Scenario]] = None) -> List[Outcome]:
         "image": _run_image_scenario,
         "audit": _run_audit_scenario,
         "dns": _run_dns_scenario,
+        "credential": _run_credential_scenario,
     }
     for scenario in scenarios:
         if scenario.check in runners:

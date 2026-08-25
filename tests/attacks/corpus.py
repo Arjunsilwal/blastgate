@@ -20,7 +20,7 @@ CORPUS_DIR = Path(__file__).resolve().parent
 
 EXPECT_VALUES = frozenset({"denied", "allowed", "not_prevented"})
 REQUIRES_VALUES = frozenset({"policy", "proxy", "sandbox"})
-CHECK_VALUES = frozenset({"egress", "filesystem", "install", "audit", "image", "dns"})
+CHECK_VALUES = frozenset({"egress", "filesystem", "install", "audit", "image", "dns", "credential"})
 TAMPER_VALUES = frozenset({"truncate", "replace-both-stores"})
 
 REQUIRED_FIELDS = ("id", "title", "chain_link", "ecosystem", "source", "expect", "requires")
