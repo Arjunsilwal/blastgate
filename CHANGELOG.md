@@ -9,6 +9,10 @@ about the threat model, because that is the part worth reading.
 - **Credential brokering.** `blast creds` stores a registry credential on the
   host; the proxy attaches it to upstream requests so the install never holds
   it. Reads only, so a payload cannot publish through the broker. npm and pypi.
+- **CI integration.** A composite GitHub Action, a JSON run summary, and exit
+  code 3 for "the install succeeded but reached for a host nobody listed".
+  Denials of hosts the allowlist names are recorded rather than escalated, so
+  the gate does not fire on ordinary install behaviour.
 - Concurrent runs. Each run gets its own internal network, so installs against
   different projects no longer collide. Previously the second run was refused.
 - Orphaned sidecars are reaped. Containers record the pid that started them, so

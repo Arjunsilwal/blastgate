@@ -12,6 +12,7 @@ that runs a command outside the sandbox.
 """
 
 import argparse
+import json
 from pathlib import Path
 import sys
 from typing import List, Optional
@@ -33,6 +34,71 @@ from blastgate.runner import (
     default_audit_path,
     run_install,
 )
+
+
+SCHEMA = "blastgate.run/1"
+
+# Exit codes, so a pipeline can branch on them.
+EXIT_OK = 0
+EXIT_REFUSED = 2            # blastgate declined to run at all
+EXIT_UNEXPECTED_EGRESS = 3  # the install worked; something reached for a host
+                            # nobody has ever listed
+
+
+def summarise_run(policy, project, command, result, audit_path, anchor=None) -> dict:
+    """What happened, in a shape something other than a human can read.
+
+    Denials are split by whether the allowlist names the host at all. An
+    install legitimately probes hosts that are listed and refused under current
+    conditions - npm reaches for codeload.github.com during a git-dependency
+    install and carries on. Failing a build on that is noise, and a gate that
+    cries wolf gets turned off. A denial naming a host nobody listed is the
+    thing worth stopping a pipeline for.
+    """
+    entries = []
+    if Path(audit_path).is_file():
+        entries = AuditLog(audit_path).read_all()
+
+    denied = []
+    for entry in entries:
+        if entry.allowed:
+            continue
+        known = policy.knows_host(entry.host)
+        denied.append({
+            "host": entry.host,
+            "reason": entry.reason,
+            "phase": entry.ecosystem,
+            "known_to_allowlist": known,
+        })
+
+    unexpected = [d for d in denied if not d["known_to_allowlist"]]
+    return {
+        "schema": SCHEMA,
+        "ecosystem": policy.ecosystem,
+        "project": str(Path(project).resolve()),
+        "command": list(command),
+        "exit_code": result.exit_code,
+        "install_ok": result.exit_code == 0,
+        "audit_log": str(audit_path),
+        "anchored": anchor is not None,
+        "decisions": {
+            "total": len(entries),
+            "allowed": sum(1 for e in entries if e.allowed),
+            "denied": len(denied),
+        },
+        "denied": denied,
+        "unexpected_egress": unexpected,
+    }
+
+
+def write_summary(summary: dict, destination) -> None:
+    text = json.dumps(summary, indent=2, sort_keys=True)
+    if str(destination) == "-":
+        sys.stdout.write(text + "\n")
+        return
+    path = Path(destination)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text + "\n", encoding="utf-8")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -111,6 +177,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Explicitly enable a condition (e.g. --allow git-dependencies)",
     )
     run_parser.add_argument("--allowlists-dir", type=Path, default=None)
+    run_parser.add_argument(
+        "--json", dest="json_out", metavar="PATH", default=None,
+        help="Write a machine-readable summary of the run. Use - for stdout. "
+             "A file by default, so the install's own output stays usable.",
+    )
+    run_parser.add_argument(
+        "--fail-on-unexpected-egress", action="store_true",
+        help=f"Exit {EXIT_UNEXPECTED_EGRESS} if anything reached for a host the "
+             f"allowlist does not name, even when the install itself succeeded. "
+             f"Hosts that are listed and refused under current conditions do "
+             f"not count: an install probes those routinely.",
+    )
 
     proxy_parser = subparsers.add_parser(
         "proxy",
@@ -199,6 +277,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-anchor",
         action="store_true",
         help="Verify the chain alone, without checking its anchor",
+    )
+    audit_parser.add_argument(
+        "--json", dest="json_out", metavar="PATH", default=None,
+        help="Write the log as JSON for review as a build artefact. - for stdout.",
     )
     audit_parser.add_argument(
         "--require-anchor",
@@ -351,10 +433,28 @@ def main(args: Optional[List[str]] = None) -> int:
 
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
+
+        summary = summarise_run(
+            policy, project, command, result, audit_path
+        )
+        if parsed_args.json_out:
+            write_summary(summary, parsed_args.json_out)
+
         sys.stdout.write(
             f"\nblast: egress decisions recorded in {audit_path}\n"
             f"    review with: blast audit {audit_path}\n"
         )
+
+        unexpected = summary["unexpected_egress"]
+        if unexpected:
+            hosts = ", ".join(sorted({d["host"] for d in unexpected}))
+            sys.stderr.write(
+                f"blast: {len(unexpected)} request(s) reached for host(s) the "
+                f"allowlist does not name: {hosts}\n"
+            )
+            if parsed_args.fail_on_unexpected_egress:
+                return EXIT_UNEXPECTED_EGRESS
+
         return result.exit_code
 
     if parsed_args.command == "audit":
@@ -389,6 +489,22 @@ def main(args: Optional[List[str]] = None) -> int:
         except AuditError as e:
             sys.stderr.write(f"Error: {e}\n")
             return 2
+
+        if parsed_args.json_out:
+            write_summary({
+                "schema": "blastgate.audit/1",
+                "audit_log": str(parsed_args.path),
+                "anchored": anchor is not None,
+                "verified": True,
+                "entries": [
+                    {
+                        "seq": e.seq, "timestamp": e.timestamp,
+                        "ecosystem": e.ecosystem, "host": e.host,
+                        "allowed": e.allowed, "rule": e.rule, "reason": e.reason,
+                    }
+                    for e in entries
+                ],
+            }, parsed_args.json_out)
 
         if not parsed_args.verify_only:
             for entry in entries:

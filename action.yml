@@ -1,0 +1,120 @@
+name: "Blastgate"
+description: "Run a package install with no credentials available and no egress except an explicit allowlist"
+branding:
+  icon: shield
+  color: orange
+
+inputs:
+  ecosystem:
+    description: "npm, pypi or cargo"
+    required: true
+  command:
+    description: "The install command, e.g. 'npm ci'"
+    required: true
+  project:
+    description: "Directory to install in"
+    required: false
+    default: "."
+  allow:
+    description: "Space-separated conditions to enable, e.g. 'git-dependencies'"
+    required: false
+    default: ""
+  fail-on-unexpected-egress:
+    description: >
+      Fail the step if anything reached for a host the allowlist does not name,
+      even when the install itself succeeded. Hosts that are listed and refused
+      under current conditions do not count.
+    required: false
+    default: "true"
+  version:
+    description: "Version of blastgate to install"
+    required: false
+    default: ""
+  summary-path:
+    description: "Where to write the JSON summary"
+    required: false
+    default: "blastgate-summary.json"
+
+outputs:
+  summary:
+    description: "Path to the JSON summary of the run"
+    value: ${{ inputs.summary-path }}
+  unexpected-egress:
+    description: "true if anything reached for a host the allowlist does not name"
+    value: ${{ steps.run.outputs.unexpected-egress }}
+  audit-log:
+    description: "Path to the audit log for this run"
+    value: ${{ steps.run.outputs.audit-log }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install blastgate
+      shell: bash
+      run: |
+        python3 -m pip install --quiet --upgrade pip
+        if [ -n "${{ inputs.version }}" ]; then
+          python3 -m pip install --quiet "blastgate==${{ inputs.version }}"
+        else
+          python3 -m pip install --quiet blastgate
+        fi
+
+    - name: Check a container runtime is present
+      shell: bash
+      run: |
+        # Without one, blastgate refuses rather than running unprotected. Say so
+        # here rather than letting the failure look like an install error.
+        if ! docker version >/dev/null 2>&1 && ! podman version >/dev/null 2>&1; then
+          echo "::error::no container runtime found; blastgate will not run an install outside a sandbox"
+          exit 1
+        fi
+
+    - name: Run the install
+      id: run
+      shell: bash
+      run: |
+        set -o pipefail
+        allow_args=""
+        for condition in ${{ inputs.allow }}; do
+          allow_args="$allow_args --allow $condition"
+        done
+
+        set +e
+        blast run "${{ inputs.ecosystem }}" \
+          --project "${{ inputs.project }}" \
+          --json "${{ inputs.summary-path }}" \
+          $allow_args \
+          $([ "${{ inputs.fail-on-unexpected-egress }}" = "true" ] && echo --fail-on-unexpected-egress) \
+          -- ${{ inputs.command }}
+        code=$?
+        set -e
+
+        if [ -f "${{ inputs.summary-path }}" ]; then
+          audit=$(python3 -c "import json,sys;print(json.load(open('${{ inputs.summary-path }}'))['audit_log'])")
+          unexpected=$(python3 -c "import json;d=json.load(open('${{ inputs.summary-path }}'));print('true' if d['unexpected_egress'] else 'false')")
+          echo "audit-log=$audit" >> "$GITHUB_OUTPUT"
+          echo "unexpected-egress=$unexpected" >> "$GITHUB_OUTPUT"
+
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+        import json
+        d = json.load(open("${{ inputs.summary-path }}"))
+        c = d["decisions"]
+        print("### Blastgate\n")
+        print(f"- ecosystem: `{d['ecosystem']}`")
+        print(f"- install: {'succeeded' if d['install_ok'] else 'failed'}")
+        print(f"- egress decisions: {c['allowed']} allowed, {c['denied']} denied\n")
+        if d["unexpected_egress"]:
+            print("**Reached for hosts the allowlist does not name:**\n")
+            for entry in d["unexpected_egress"]:
+                print(f"- `{entry['host']}` — {entry['reason']}")
+        elif d["denied"]:
+            print("Denied hosts were all ones the allowlist names, which an install probes routinely.\n")
+        PY
+        fi
+
+        # 3 means the install worked but something reached somewhere it should
+        # not have. Surface it as its own annotation rather than a bare failure.
+        if [ "$code" = "3" ]; then
+          echo "::error::install succeeded but reached for a host the allowlist does not name; see the job summary"
+        fi
+        exit $code

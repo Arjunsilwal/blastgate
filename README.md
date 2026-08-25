@@ -107,6 +107,33 @@ Read it as "no false positives found in sixteen projects", not as a rate.
 - **Untested entirely:** private registries, authenticated `.npmrc`, workspace
   monorepos, yarn, and pnpm.
 
+## In CI
+
+```yaml
+- uses: Arjunsilwal/blastgate@v0.1.0
+  with:
+    ecosystem: npm
+    command: npm ci
+```
+
+Exit code 3 is the one worth gating on: **the install succeeded, and something
+reached for a host the allowlist does not name.** Without a distinct code that
+is invisible to a pipeline, because nothing failed.
+
+Denials are not all equal, and treating them as if they were is how a gate gets
+switched off. An npm install with a git dependency reaches for
+`codeload.github.com`, is refused because the forge is deliberately unreachable
+during the install phase, and finishes from the local mirror. That is correct
+behaviour, not an incident:
+
+```
+denied: [('codeload.github.com', 'known')]     -> exit 0
+denied: [('exfil.attacker.test', 'UNKNOWN')]   -> exit 3
+```
+
+`--json PATH` writes a machine-readable summary. Full details in
+[docs/ci.md](docs/ci.md).
+
 ## What the attack corpus scores
 
 `tests/attacks/` holds executable scenarios. Each one is run against the real

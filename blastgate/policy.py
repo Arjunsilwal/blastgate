@@ -246,6 +246,33 @@ class Policy:
 
         return host
 
+    def knows_host(self, host: str) -> bool:
+        """Whether this host appears anywhere in the allowlist, allowed or not.
+
+        A denial is not automatically interesting. An install legitimately
+        probes hosts the allowlist names and refuses under current conditions -
+        npm reaches for codeload.github.com during a git-dependency install and
+        carries on when refused. Failing a build on that would be noise, and a
+        gate that cries wolf gets switched off.
+
+        A denial naming a host nobody has ever listed is different. That is the
+        signal worth stopping a pipeline for.
+        """
+        try:
+            normalised = self.normalize_host(host)
+        except PolicyError:
+            # Unparseable hosts are refused by evaluate() and are certainly not
+            # something the allowlist names.
+            return False
+        if normalised in self._exact_map or normalised in self._conditional_map:
+            return True
+        for rule in self.wildcard_rules:
+            if normalised.endswith(rule.suffix):
+                prefix = normalised[: -len(rule.suffix)]
+                if prefix and not prefix.endswith("."):
+                    return True
+        return False
+
     def evaluate(
         self,
         raw_host: str,
