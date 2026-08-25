@@ -1,0 +1,22 @@
+id: shai-hulud-webhook-exfiltration
+title: Worm posts harvested credentials to a webhook collection endpoint
+chain_link: 5
+ecosystem: npm
+source: https://unit42.paloaltonetworks.com/npm-supply-chain-attack/
+expect: denied
+requires: policy
+
+target:
+  host: webhook.site
+  port: 443
+
+note: >
+  The Shai-Hulud npm worm, September and November 2025, which infected several
+  hundred packages including ones published by Zapier, PostHog and Postman. It
+  harvested npm tokens from .npmrc, GitHub PATs, and AWS, GCP and Azure keys
+  from the environment, then posted them to a webhook.site collection endpoint.
+  webhook.site is a legitimate service, which is the point: the destination is
+  not a domain anyone would think to blocklist, it is an ordinary request
+  collector that happens to accept anything. Default-deny does not need to
+  recognise it as hostile - it only has to notice the host is not one an npm
+  install has any business reaching.

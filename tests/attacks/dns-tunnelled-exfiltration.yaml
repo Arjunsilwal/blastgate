@@ -1,0 +1,28 @@
+id: dns-tunnelled-exfiltration
+title: Payload encodes stolen data in DNS queries to a nameserver it controls
+chain_link: 5
+ecosystem: npm
+source: https://pytorch.org/blog/compromised-nightly-dependency/
+expect: denied
+requires: sandbox
+check: dns
+
+target:
+  host: c2VjcmV0LWRhdGE.h4ck.cfd
+  port: 443
+
+note: >
+  Modelled on torchtriton, the malicious PyPI package installed by pytorch
+  nightly between 25 and 30 December 2022. It read SSH keys and up to a
+  thousand files from $HOME and exfiltrated them by DNS tunnelling to *.h4ck.cfd
+  - encoding the data in the query itself, which needs no reply and no outbound
+  connection in the ordinary sense. The subdomain here is a stand-in for that
+  encoding.
+  Prevented, and not by anything aimed at DNS. The install container has no
+  resolver and no route to one, so nothing resolves - not even the registry it
+  is allowed to reach. Names are resolved by the proxy, from the hostname in a
+  CONNECT request, and only after policy has allowed it: a denied host is
+  refused before open_connection is ever called, so no query for it leaves the
+  machine.
+  Section 8.1 described this as an open gap until this scenario was written.
+  The topology had closed it and the record had not caught up.

@@ -201,6 +201,46 @@ def _run_image_scenario(scenario: Scenario) -> Outcome:
         shutil.rmtree(project, ignore_errors=True)
 
 
+DNS_PROBE = r"""
+import socket, sys
+name = sys.argv[1]
+try:
+    socket.getaddrinfo(name, 443)
+    print("RESOLVED")
+except Exception as e:
+    print("NORESOLVE", type(e).__name__)
+"""
+
+
+def _run_dns_scenario(scenario: Scenario) -> Outcome:
+    """Try to resolve an attacker-controlled name from inside the sandbox.
+
+    DNS tunnelling does not need a reply to work: the query itself carries the
+    data to a nameserver the attacker controls. So the question is not whether
+    the lookup succeeds, it is whether any query leaves at all.
+    """
+    project = _scratch_project()
+    audit = default_audit_path(project)
+    try:
+        result = run_install(
+            policy=load_policy(scenario.ecosystem),
+            command=["python", "-c", DNS_PROBE, scenario.target.host],
+            project_dir=project, image=PROBE_IMAGE, audit_path=audit,
+            enabled_conditions=set(scenario.enable), host_env={}, timeout=300,
+        )
+        if "RESOLVED" in result.stdout:
+            return _classify(scenario, True, "the name resolved from inside the sandbox")
+        if "NORESOLVE" in result.stdout:
+            return _classify(scenario, False, result.stdout.strip().splitlines()[-1])
+        return Outcome(scenario, NOT_RUNNABLE, result.stderr.strip()[-200:] or "probe did not run")
+    except Exception as e:
+        return Outcome(scenario, NOT_RUNNABLE, f"{type(e).__name__}: {e}")
+    finally:
+        shutil.rmtree(project, ignore_errors=True)
+        if audit.exists():
+            audit.unlink()
+
+
 def _run_audit_scenario(scenario: Scenario) -> Outcome:
     """Tamper with an audit log on the host and see whether it is caught.
 
@@ -263,6 +303,7 @@ def run_corpus(scenarios: Optional[List[Scenario]] = None) -> List[Outcome]:
         "install": _run_install_scenario,
         "image": _run_image_scenario,
         "audit": _run_audit_scenario,
+        "dns": _run_dns_scenario,
     }
     for scenario in scenarios:
         if scenario.check in runners:

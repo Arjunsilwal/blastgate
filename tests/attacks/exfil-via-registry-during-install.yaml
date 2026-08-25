@@ -2,7 +2,7 @@ id: exfil-via-registry-during-install
 title: Payload uses the package registry itself as the exfiltration channel
 chain_link: 5
 ecosystem: npm
-source: constructed
+source: https://www.sysdig.com/blog/shai-hulud-the-novel-self-replicating-worm-infecting-hundreds-of-npm-packages
 expect: not_prevented
 requires: proxy
 
@@ -11,6 +11,10 @@ target:
   port: 443
 
 note: >
+  Shai-Hulud's propagation step is this scenario: it used the stolen npm token
+  to republish every package the compromised maintainer controlled, which is
+  how it spread to hundreds of packages without further human error. The
+  registry was both the delivery channel and the outbound one.
   The honest residual left behind by closing the forge gap, and the reason that
   fix is a narrowing rather than a solution. The registry has to be reachable
   during an install; that is what an install is. Any allowlisted host that

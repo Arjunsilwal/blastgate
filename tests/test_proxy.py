@@ -239,6 +239,71 @@ class TestEnforcement:
         assert log.verify() is True
 
 
+class TestResolutionOrder:
+    """A denied hostname must never be resolved.
+
+    This is what closes DNS-based exfiltration, and it is a property of
+    ordering rather than of anything aimed at DNS. The install container has no
+    resolver at all; the proxy resolves, from the CONNECT hostname. If it
+    resolved before deciding, a payload could exfiltrate by encoding data into
+    a hostname it never expects to reach - the query alone carries the data to
+    a nameserver the attacker controls, and a 403 afterwards would be far too
+    late.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_denied_host_is_never_resolved(self, policy, tmp_path):
+        resolved = []
+
+        real_open = asyncio.open_connection
+
+        async def recording_open(host, port, *a, **kw):
+            resolved.append(host)
+            return await real_open(host, port, *a, **kw)
+
+        log = AuditLog(tmp_path / "audit.log")
+        proxy = await EgressProxy(policy, audit_log=log).start()
+        import bulkhead.proxy as proxy_module
+        original = proxy_module.asyncio.open_connection
+        proxy_module.asyncio.open_connection = recording_open
+        try:
+            status, _ = await speak_to_proxy(
+                proxy.bound_port, connect_request("c2VjcmV0.h4ck.cfd")
+            )
+            assert status == "HTTP/1.1 403 Forbidden"
+        finally:
+            proxy_module.asyncio.open_connection = original
+            await proxy.stop()
+
+        # The client's own connection to the proxy is loopback; nothing else.
+        assert "c2VjcmV0.h4ck.cfd" not in resolved
+        assert log.read_all()[0].allowed is False
+
+    @pytest.mark.asyncio
+    async def test_a_denied_port_is_never_resolved(self, policy, tmp_path):
+        # The port check runs before policy, and before resolution too.
+        resolved = []
+        real_open = asyncio.open_connection
+
+        async def recording_open(host, port, *a, **kw):
+            resolved.append(host)
+            return await real_open(host, port, *a, **kw)
+
+        proxy = await EgressProxy(policy, audit_log=AuditLog(tmp_path / "a.log")).start()
+        import bulkhead.proxy as proxy_module
+        original = proxy_module.asyncio.open_connection
+        proxy_module.asyncio.open_connection = recording_open
+        try:
+            status, _ = await speak_to_proxy(
+                proxy.bound_port, connect_request("registry.npmjs.org", port=8443)
+            )
+            assert status == "HTTP/1.1 403 Forbidden"
+        finally:
+            proxy_module.asyncio.open_connection = original
+            await proxy.stop()
+        assert "registry.npmjs.org" not in resolved
+
+
 class TestDefaults:
     def test_only_https_is_permitted_by_default(self):
         assert DEFAULT_ALLOWED_PORTS == frozenset({443})

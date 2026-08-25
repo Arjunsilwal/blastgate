@@ -20,7 +20,7 @@ CORPUS_DIR = Path(__file__).resolve().parent
 
 EXPECT_VALUES = frozenset({"denied", "allowed", "not_prevented"})
 REQUIRES_VALUES = frozenset({"policy", "proxy", "sandbox"})
-CHECK_VALUES = frozenset({"egress", "filesystem", "install", "audit", "image"})
+CHECK_VALUES = frozenset({"egress", "filesystem", "install", "audit", "image", "dns"})
 TAMPER_VALUES = frozenset({"truncate", "replace-both-stores"})
 
 REQUIRED_FIELDS = ("id", "title", "chain_link", "ecosystem", "source", "expect", "requires")
@@ -99,10 +99,10 @@ def parse_scenario(data: dict, source: Path) -> Scenario:
         )
 
     target = None
-    if check == "egress":
+    if check in ("egress", "dns"):
         raw = data.get("target")
         if not isinstance(raw, dict) or "host" not in raw:
-            raise ScenarioError(f"{source.name}: an egress scenario needs target.host")
+            raise ScenarioError(f"{source.name}: a {check} scenario needs target.host")
         target = Target(host=str(raw["host"]), port=int(raw.get("port", 443)))
 
     paths = tuple(data.get("paths", ()))

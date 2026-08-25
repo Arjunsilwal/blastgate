@@ -118,12 +118,13 @@ python scripts/attack_report.py --write
 ```
 
 <!-- corpus:begin -->
-**11 of 13 scenarios prevented (85%).**
+**13 of 15 scenarios prevented (87%).**
 
 | Scenario | Link | Expected | Result |
 | --- | --- | --- | --- |
 | `audit-replacement-is-detected` | 6 | not_prevented | known-gap ⚠ |
 | `audit-truncation-is-detected` | 6 | denied | prevented |
+| `dns-tunnelled-exfiltration` | 5 | denied | prevented |
 | `egress-forge-without-opt-in` | 5 | denied | prevented |
 | `egress-lookalike-registry` | 5 | denied | prevented |
 | `egress-nonstandard-port` | 5 | denied | prevented |
@@ -135,6 +136,7 @@ python scripts/attack_report.py --write
 | `git-dependency-still-installs` | 0 | allowed | allowed |
 | `harvest-host-credential-files` | 4 | denied | prevented |
 | `registry-traffic-still-works` | 0 | allowed | allowed |
+| `shai-hulud-webhook-exfiltration` | 5 | denied | prevented |
 
 Counted as failures because they are:
 - `audit-replacement-is-detected` — Attacker replaces the log and re-anchors it with a chain of their own
@@ -147,10 +149,16 @@ cases it wins produces a nicer number and a worse tool. A test in
 `tests/test_attacks.py` fails if this README stops matching what the corpus
 actually scores.
 
-This number went **down** when the corpus grew, from 88% to 85%. Nothing
-regressed; two disclosed gaps are now counted against a larger set. A rate that
-can only rise is a curated one, and there is a test asserting that adding an
-honest gap lowers it.
+This number moves when the corpus grows, in both directions, and neither
+direction means what it looks like. It fell from 88% to 85% when two disclosed
+gaps started being counted against a larger set, and rose again when scenarios
+were added that bulkhead prevents. A rate that can only rise is a curated one,
+and there is a test asserting that adding an honest gap lowers it.
+
+Scenarios are drawn from documented incidents where one exists. The
+`source:` field carries the write-up, and scenarios with no verifiable source
+say `constructed` rather than borrowing a citation from an incident they only
+resemble.
 
 ## What actually stops a payload
 

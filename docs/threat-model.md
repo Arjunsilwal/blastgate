@@ -14,7 +14,7 @@ wired to any package manager. **Nothing in section 6 constitutes protection of a
 real install today.** See section 7 for the precise gap between design and
 implementation.
 
-Document version: 14. Last reviewed: 2026-08-22.
+Document version: 15. Last reviewed: 2026-08-22.
 
 **Design note, recorded because it departs from the v0 plan.** The plan specified
 environment variables "filtered by shape (prefix, and any name containing TOKEN,
@@ -223,6 +223,8 @@ connectivity would satisfy every isolation assertion while proving nothing.
 | Nothing in the resolve image can run a package lifecycle script *(runtime)* | No package manager and no interpreter present | `fetch-phase-runs-no-lifecycle-scripts` |
 | The corpus can score the tool worse than before *(constrains bulkhead)* | An added gap lowers the published rate | `TestScoring::test_adding_an_honest_gap_lowers_the_rate` |
 | The published pass rate matches what the corpus scores *(constrains bulkhead)* | README is generated, and a test fails if it drifts | `TestCorpusResults::test_the_published_number_matches_the_corpus` |
+| A denied hostname is never resolved | Policy is evaluated and refused before `open_connection` | `test_proxy.py::TestResolutionOrder::test_a_denied_host_is_never_resolved` |
+| DNS-tunnelled exfiltration does not leave the sandbox *(runtime)* | No resolver inside; the proxy resolves only allowed names | `dns-tunnelled-exfiltration` |
 | Truncating an audit log is detected | Anchor records head hash and entry count | `test_audit.py::TestDisclosedLimits::test_truncating_the_tail_IS_detected_against_an_anchor` |
 | Truncating a log written by a real run is detected *(runtime)* | Anchor written by the host runner after the sidecar stops | `test_end_to_end.py::TestAnchoring::test_truncating_the_log_after_a_run_is_detected` |
 | Removing a whole run's anchor is detected | Anchors are chained across runs | `TestAnchorStore::test_removing_a_whole_run_breaks_the_anchor_chain` |
@@ -369,8 +371,17 @@ to read it and not find a gap that was left undisclosed.
   taken. Removing the grant without adding a parser does not close the gap, it
   only breaks every project with a git dependency, which is what it did briefly
   for pypi and cargo before the compatibility check caught it.
-- **DNS-based exfiltration.** Data encoded in DNS queries is not detected or
-  blocked.
+- **DNS-based exfiltration is closed, by ordering rather than by inspection.**
+  This entry used to say the opposite. It was wrong, and writing a scenario from
+  a real incident is what surfaced it. The install container has no resolver and
+  no route to one, so nothing resolves inside the sandbox - not even the
+  registry it is allowed to reach. Names are resolved by the proxy, taken from
+  the CONNECT request, and only after policy has allowed the host: a denial is
+  written and returned before `open_connection` is ever called. So no query for
+  a denied name leaves the machine, which matters because a DNS tunnel needs no
+  reply - the query itself carries the data. Asserted in
+  `TestResolutionOrder::test_a_denied_host_is_never_resolved` and reproduced end
+  to end by `dns-tunnelled-exfiltration`.
 - **Compromised base image or package manager.** If the sandbox interior is
   already hostile, bulkhead enforces nothing useful.
 - **Post-install runtime.** Bulkhead protects the install. It does not protect the

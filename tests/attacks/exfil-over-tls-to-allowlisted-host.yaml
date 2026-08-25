@@ -2,7 +2,7 @@ id: exfil-over-tls-to-allowlisted-host
 title: Payload writes stolen material to an attacker repo on a code forge
 chain_link: 5
 ecosystem: npm
-source: constructed
+source: https://unit42.paloaltonetworks.com/npm-supply-chain-attack/
 expect: denied
 requires: proxy
 
@@ -14,6 +14,11 @@ target:
   port: 443
 
 note: >
+  Not hypothetical. The Shai-Hulud worm exfiltrated by creating a public GitHub
+  repository under the victim's own account and committing the stolen secrets
+  into it, and by flipping the victim's private repositories to public. Around
+  26,000 repositories were exposed. The destination was github.com, over TLS,
+  from a machine where reaching github.com is entirely normal.
   This was a disclosed gap and is now closed, which is why it says denied and
   not not_prevented. It was never closed by inspecting traffic. The forge is
   simply not in the install phase's allowlist any more: declared git
