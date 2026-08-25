@@ -378,6 +378,15 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
     auth_header = ""
     local_origin = ""
     audit_log = None
+    # HTTP/1.1 so clients get a well-formed response, but every connection is
+    # closed after one exchange.
+    #
+    # Keep-alive means the client reuses a socket the server may close first,
+    # and npm's client reuses aggressively. That race surfaced as an
+    # intermittent ECONNRESET - "socket hang up" - on CI, on one Python version,
+    # having passed locally many times. A broker that occasionally drops a
+    # connection is worse than one that is marginally slower, and this runs on a
+    # loopback-speed network between two containers.
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
@@ -401,7 +410,9 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
 
     def _reject(self):
         self._record(False, f"{self.command} refused: the broker forwards reads only")
+        self.close_connection = True
         self.send_response(405)
+        self.send_header("Connection", "close")
         self.send_header("Allow", "GET, HEAD")
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -431,7 +442,9 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
             status, headers = e.code, e.headers
         except Exception as e:                      # noqa: BLE001 - reported, not raised
             self._record(False, f"upstream failed: {type(e).__name__}")
+            self.close_connection = True
             self.send_response(502)
+            self.send_header("Connection", "close")
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
@@ -447,11 +460,13 @@ class BrokerHandler(http.server.BaseHTTPRequestHandler):
             )
 
         self._record(True, f"{self.command} {self.path[:80]} -> {status}")
+        self.close_connection = True
         self.send_response(status)
         for name, value in headers.items():
             if name.lower() not in _HOP_BY_HOP:
                 self.send_header(name, value)
         self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Connection", "close")
         self.end_headers()
         if body and payload:
             self.wfile.write(payload)

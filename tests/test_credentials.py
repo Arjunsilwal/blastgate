@@ -187,3 +187,25 @@ class TestBroker:
 
     def test_only_reads_are_declared_forwardable(self):
         assert BROKER_METHODS == {"GET", "HEAD"}
+
+    def test_every_response_closes_its_connection(self, broker):
+        # Keep-alive let the client reuse a socket the server might close
+        # first, which surfaced as an intermittent ECONNRESET on CI. Closing
+        # each exchange removes the race entirely.
+        server, _ = broker
+        with urllib.request.urlopen(broker_url(server), timeout=10) as response:
+            assert response.headers.get("Connection", "").lower() == "close"
+
+    def test_a_refused_write_also_closes(self, broker):
+        server, _ = broker
+        request = urllib.request.Request(broker_url(server), method="PUT", data=b"{}")
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request, timeout=10)
+        assert caught.value.headers.get("Connection", "").lower() == "close"
+
+    def test_repeated_requests_all_succeed(self, broker):
+        # The install makes many; one reset fails the whole thing.
+        server, _ = broker
+        for _ in range(15):
+            with urllib.request.urlopen(broker_url(server), timeout=10) as response:
+                assert response.status == 200
