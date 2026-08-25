@@ -36,6 +36,7 @@ import contextlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -431,17 +432,7 @@ def run_sandboxed(
         # the isolation boundary; the boundary is the runtime itself.
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
-        # Run as the invoking user, not root.
-        #
-        # --cap-drop ALL removes CAP_DAC_OVERRIDE, so a root process in the
-        # container cannot write to a bind mount owned by someone else. On
-        # macOS the runtime's filesystem sharing hides that by mapping
-        # ownership; on Linux it fails outright, which is what CI found.
-        #
-        # Matching the host uid also stops an install leaving root-owned files
-        # in the user's project, which is a real annoyance on Linux and not
-        # something a sandbox should introduce.
-        "--user", f"{os.getuid()}:{os.getgid()}",
+        *user_args(runtime),
     ]
 
     if entrypoint is not None:
@@ -747,6 +738,39 @@ def assert_no_stale_proxy(runtime: str, network: Optional[str] = None) -> None:
     )
 
 
+@functools.lru_cache(maxsize=4)
+def podman_is_rootless(runtime: str) -> bool:
+    if "podman" not in runtime:
+        return False
+    try:
+        result = _run([runtime, "info", "--format", "{{.Host.Security.Rootless}}"], timeout=30)
+    except OSError:
+        # Not installed or not runnable. Treat as not-rootless: pinning the uid
+        # is the safe default, and a runtime we cannot even probe will fail
+        # later with a clearer error than anything invented here.
+        return False
+    return result.stdout.strip().lower() == "true"
+
+
+def user_args(runtime: str) -> List[str]:
+    """Whether to pin the container to the invoking uid, which depends on the
+    runtime and gets it backwards if you assume.
+
+    Docker runs the container as root in the host's user namespace, so a root
+    process with CAP_DAC_OVERRIDE dropped cannot write to a bind mount owned by
+    the user. It needs --user to match.
+
+    Rootless podman already maps the invoking user to root inside the
+    container, so --user does the opposite of what it does under docker: it
+    moves the process onto a subordinate uid that owns nothing. CI found this
+    the hard way - the flag that fixed Linux under docker broke it under
+    podman, with the identical error message.
+    """
+    if podman_is_rootless(runtime):
+        return []
+    return ["--user", f"{os.getuid()}:{os.getgid()}"]
+
+
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -895,7 +919,7 @@ class ProxySidecar:
             # Same reason as the install container: without CAP_DAC_OVERRIDE a
             # root process cannot write to a mount owned by the host user, so
             # the audit log would fail to be written on Linux.
-            "--user", f"{os.getuid()}:{os.getgid()}",
+            *user_args(self.runtime),
             "--env", "HOME=/tmp",
             self.image,
             "proxy", self.ecosystem,

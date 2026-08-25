@@ -239,3 +239,50 @@ class TestProxyImageFreshness:
         (tmp_path / "proxy.py").write_text("# code\n")
 
         assert proxy_image_tag(tmp_path) == proxy_image_tag(tmp_path)
+
+
+class TestUserMapping:
+    """Whether to pin the container to the invoking uid, which is runtime-specific.
+
+    Docker runs the container as root in the host's user namespace, so with
+    CAP_DAC_OVERRIDE dropped it cannot write to a bind mount owned by the user.
+    Rootless podman already maps the invoking user to root inside the
+    container, so the same flag moves the process onto a subordinate uid that
+    owns nothing.
+
+    CI found this by regression: the flag that fixed Linux under docker broke
+    Linux under podman, with the identical error message.
+    """
+
+    def test_docker_pins_the_invoking_uid(self, monkeypatch):
+        import os as _os
+
+        from blastgate.runner import user_args
+
+        monkeypatch.setattr("blastgate.runner.podman_is_rootless", lambda r: False)
+        assert user_args("docker") == ["--user", f"{_os.getuid()}:{_os.getgid()}"]
+
+    def test_rootless_podman_is_left_alone(self, monkeypatch):
+        from blastgate.runner import user_args
+
+        monkeypatch.setattr("blastgate.runner.podman_is_rootless", lambda r: True)
+        assert user_args("podman") == []
+
+    def test_rootful_podman_pins_like_docker(self, monkeypatch):
+        from blastgate.runner import user_args
+
+        monkeypatch.setattr("blastgate.runner.podman_is_rootless", lambda r: False)
+        assert user_args("podman")[0] == "--user"
+
+    def test_an_unprobeable_runtime_falls_back_to_pinning(self, monkeypatch):
+        # A runtime we cannot even ask fails later with a clearer message than
+        # anything guessed here.
+        from blastgate.runner import podman_is_rootless
+
+        podman_is_rootless.cache_clear()
+        monkeypatch.setattr(
+            "blastgate.runner._run",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("not installed")),
+        )
+        assert podman_is_rootless("podman") is False
+        podman_is_rootless.cache_clear()
