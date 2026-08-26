@@ -243,6 +243,20 @@ class TestCorpusResults:
                         f"docs/threat-model.md section 8 and this scenario."
                     )
 
+    def test_scenario_provenance_is_reported(self, report):
+        # A corpus written entirely from its own threat model is weaker
+        # evidence than one drawn from incidents, and the published output
+        # should say so rather than leaving a reader to count YAML files.
+        assert report.sourced >= 1
+        assert f"{report.sourced} of {report.total} are derived" in report.to_markdown()
+
+    def test_a_constructed_scenario_is_not_counted_as_sourced(self):
+        outcomes = [
+            Outcome(scenario(id="a", source="constructed"), PREVENTED, ""),
+            Outcome(scenario(id="b", source="https://example.test/writeup"), PREVENTED, ""),
+        ]
+        assert Report(outcomes).sourced == 1
+
     def test_the_published_number_matches_the_corpus(self, report):
         # The README cannot drift away from what the corpus actually scores.
         readme = Path(__file__).resolve().parent.parent / "README.md"

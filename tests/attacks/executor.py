@@ -425,10 +425,23 @@ class Report:
     def by_status(self, status: str) -> List[Outcome]:
         return [o for o in self.outcomes if o.status == status]
 
+    @property
+    def sourced(self) -> int:
+        """Scenarios derived from a documented incident rather than invented."""
+        return sum(
+            1 for o in self.outcomes
+            if o.scenario.source and o.scenario.source != "constructed"
+        )
+
     def to_markdown(self) -> str:
         lines = [
             f"**{self.passed} of {self.total} scenarios prevented "
             f"({self.rate:.0f}%).**",
+            "",
+            f"{self.sourced} of {self.total} are derived from documented "
+            f"incidents; the rest are constructed from the threat model. That "
+            f"ratio is the weakest thing about this evidence, so it is "
+            f"published next to the number it supports.",
             "",
             "| Scenario | Link | Expected | Result |",
             "| --- | --- | --- | --- |",

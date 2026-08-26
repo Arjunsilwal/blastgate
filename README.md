@@ -219,6 +219,8 @@ python scripts/attack_report.py --write
 <!-- corpus:begin -->
 **14 of 16 scenarios prevented (88%).**
 
+7 of 16 are derived from documented incidents; the rest are constructed from the threat model. That ratio is the weakest thing about this evidence, so it is published next to the number it supports.
+
 | Scenario | Link | Expected | Result |
 | --- | --- | --- | --- |
 | `audit-replacement-is-detected` | 6 | not_prevented | known-gap ⚠ |
@@ -396,6 +398,26 @@ optional and is not a packaging detail: the isolation *is* the container. There
 is no degraded mode that runs an install without one, because a sandbox that
 falls back to no sandbox is worse than no sandbox, and `blast run` refuses
 rather than pretending.
+
+## What it costs
+
+<!-- benchmark:begin -->
+**The sandbox costs about 1.7s per run.** That is a fixed amount - create a network, start the proxy sidecar, wait for it to listen, tear it down - measured against a command that does nothing, so no install work hides it (0.6s bare container, 2.3s sandboxed).
+
+| Ecosystem | Without | With | Difference |
+| --- | --- | --- | --- |
+| npm | 10.6s | 13.0s | +2.4s |
+| pypi | 5.6s | 7.2s | +1.6s |
+| cargo | 1.4s | 3.2s | +1.7s |
+
+Those per-ecosystem differences are mostly network variance, not blastgate. An install that spends twenty seconds talking to a registry moves by more than that between runs, and one of these measurements came out *faster* sandboxed, which is impossible and is exactly what noise at this scale looks like. Read the fixed startup figure above instead, and expect it to matter for short installs and disappear into the noise for long ones.
+
+**Cold start: 15s**, once per machine. That is a genuine first run - no proxy image, no layer cache, and the base image pulled fresh, which is most of it. The ecosystem's own image (node, python, rust) is pulled on top the first time you use that ecosystem. This is the number a new user actually waits through, and it is the one usually left out.
+
+That figure is network-bound and varies more than the warm ones: measurements here ranged from about 16s to 149s, the slow end being a run that shared the machine with a full test suite. Treat it as tens of seconds, not as a constant.
+
+Medians of 3 runs on the maintainer's machine, warm images, real network. Regenerate with `python scripts/benchmark.py --cold --write`.
+<!-- benchmark:end -->
 
 ## Run an install
 

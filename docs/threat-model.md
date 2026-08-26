@@ -14,7 +14,7 @@ wired to any package manager. **Nothing in section 6 constitutes protection of a
 real install today.** See section 7 for the precise gap between design and
 implementation.
 
-Document version: 18. Last reviewed: 2026-08-22.
+Document version: 19. Last reviewed: 2026-08-22.
 
 **Design note, recorded because it departs from the v0 plan.** The plan specified
 environment variables "filtered by shape (prefix, and any name containing TOKEN,
@@ -393,8 +393,14 @@ to read it and not find a gap that was left undisclosed.
   to end by `dns-tunnelled-exfiltration`.
 - **Compromised base image or package manager.** If the sandbox interior is
   already hostile, blastgate enforces nothing useful.
-- **Post-install runtime.** Blastgate protects the install. It does not protect the
-  application when it later runs.
+- **Post-install runtime, and build output.** Blastgate protects the install. It
+  does not protect the application the install produces, and it does not notice
+  a package that tampers with a build rather than exfiltrating from it.
+  event-stream in 2018 is the documented example: the payload did not steal
+  anything from the machine that installed it, it injected a wallet-stealing
+  script into Copay's release build, and the theft happened later on end users'
+  devices. Nothing in this design would have stopped that. The install was, from
+  an egress point of view, entirely well-behaved.
 - **Anything outside an install.** A malicious package that does nothing at
   install time and attacks in production is entirely out of scope.
 

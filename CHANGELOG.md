@@ -5,6 +5,13 @@ about the threat model, because that is the part worth reading.
 
 ## Unreleased
 
+### Added
+- Published benchmarks. The sandbox costs a fixed ~2s per run; cold start is
+  tens of seconds, once per machine. `scripts/benchmark.py` regenerates them.
+- The attack corpus now publishes how many scenarios come from documented
+  incidents alongside its pass rate, because that ratio is the weaker number.
+- `egress-raw-ip` is derived from the Codecov breach rather than constructed.
+
 ## 0.1.0 — 2026-08-26
 
 First tagged version. Pre-alpha: every control is built and demonstrated
