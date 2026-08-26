@@ -5,6 +5,12 @@ about the threat model, because that is the part worth reading.
 
 ## Unreleased
 
+## 0.1.0 — 2026-08-26
+
+First tagged version. Pre-alpha: every control is built and demonstrated
+against running containers, and section 8 of the threat model is longer than
+section 6 on purpose.
+
 ### Added
 - **Credential brokering.** `blast creds` stores a registry credential on the
   host; the proxy attaches it to upstream requests so the install never holds
@@ -43,9 +49,3 @@ about the threat model, because that is the part worth reading.
 - Renamed from `bulkhead` to `blastgate`. The CLI is `blast`.
 - Threat model 8.1 no longer claims DNS-based exfiltration is unblocked. It is
   blocked, by the proxy resolving only after policy allows a host.
-
-## 0.1.0 — unreleased
-
-First tagged version. Pre-alpha: every control is built and demonstrated
-against running containers, and section 8 of the threat model is longer than
-section 6 on purpose.
