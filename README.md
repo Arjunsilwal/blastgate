@@ -300,6 +300,18 @@ and no TLS parser in the path of attacker-controlled bytes. What a payload
 retains is the ability to *make* authenticated reads during the install; what
 it cannot do is take the token anywhere.
 
+**Untested against a real private registry.** The end-to-end test runs against
+the public npm registry, which accepts any bearer token on a public read. That
+proves the credential never enters the sandbox. It does not prove that
+Artifactory, Nexus, or a private npm scope accept the header shape blastgate
+sends. If it does not fit, the install fails with an authentication error
+rather than falling back to something less safe — but expect to be the first
+person to find out. Reports welcome.
+
+Brokering is wired for npm and pypi. cargo needs registry source replacement
+rather than an index URL and is not done, so a cargo install gets no brokering
+rather than a setting that silently does nothing.
+
 The audit log is written to a directory mounted into the proxy container and
 nowhere else, so the sandbox cannot read or delete it. Pointing `--audit` inside
 the project directory is refused, because the project is mounted writable and a
