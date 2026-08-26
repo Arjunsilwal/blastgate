@@ -1,14 +1,64 @@
 # blastgate
 
-> **Status: pre-alpha. Every control in the design is built and demonstrated
-> against running containers.** A real `npm install` completes inside the
-> sandbox with one allowed route out, including projects with git dependencies,
-> which are fetched before any package code runs. It has not been run against a
-> live worm, and a payload can still use the registry itself as a channel — read
-> [docs/threat-model.md](docs/threat-model.md) section 8 before relying on it.
-
 Run package installs with no credentials available and no network egress except
 an explicit allowlist.
+
+```bash
+pip install blastgate
+blast npm ci
+```
+
+## Why
+
+In September 2025 the Shai-Hulud worm read npm tokens from `~/.npmrc` across
+roughly 500 packages — including ones published by Zapier, PostHog and Postman —
+and used them to republish itself. It exfiltrated to public GitHub repositories
+it created under its victims' own accounts, exposing about 26,000 repos
+([Unit 42](https://unit42.paloaltonetworks.com/npm-supply-chain-attack/),
+[Krebs](https://krebsonsecurity.com/2025/09/self-replicating-worm-hits-180-software-packages/)).
+
+It needed two things: credentials it could read, and somewhere to send them.
+
+Under blastgate an install has neither. This is a real run of a project with a
+git dependency, straight from the audit log:
+
+```
+npm-resolve  ALLOW  github.com            ← fetched before any package code ran
+npm          ALLOW  registry.npmjs.org
+npm          DENY   codeload.github.com   ← the install reached for a forge; refused
+```
+
+The install succeeded. The forge was unreachable the entire time package code
+was executing, because git dependencies are fetched in a separate phase before
+any of it runs.
+
+With a private registry configured, the token is not in the sandbox at all. A
+probe reading every environment variable and every readable file finds nothing:
+
+```
+ENV_HITS []
+FILE_HITS []
+```
+
+That is a test in the suite, not a claim in a README.
+
+## What this does not do
+
+It does not tell you whether a package is malicious. It assumes the answer is
+yes and constrains what one can reach.
+
+**Status: pre-alpha.** Every control is built and demonstrated against running
+containers — 448 tests, CI on Linux and macOS, Docker and Podman. It has never
+been run against a live worm. A payload can still use the registry itself as an
+exfiltration channel, and credential brokering is untested against a real
+private registry.
+
+Section 8 of the [threat model](docs/threat-model.md) is longer than section 6
+on purpose: it lists everything this does not defend against, and the attack
+corpus counts its own disclosed gaps as failures rather than omitting them. That
+is why the published score is 14 of 16 and not 100%.
+
+Read section 8 before relying on this.
 
 ## The problem
 
@@ -341,7 +391,11 @@ that limit is asserted by a test so it cannot be quietly assumed closed.
 pip install blastgate
 ```
 
-Requires Docker or Podman, and Python 3.10+.
+Python 3.10+ and a container runtime — Docker or Podman. The runtime is not
+optional and is not a packaging detail: the isolation *is* the container. There
+is no degraded mode that runs an install without one, because a sandbox that
+falls back to no sandbox is worse than no sandbox, and `blast run` refuses
+rather than pretending.
 
 ## Run an install
 
@@ -447,6 +501,25 @@ pip install -e ".[test]" && pytest
 
 The evasion cases in `tests/test_policy.py` are the highest-value tests here and
 back every claim in section 6 of the threat model.
+
+## License
+
+Apache 2.0. See [LICENSE](LICENSE).
+
+## Contributing
+
+The most useful contribution is an attack scenario drawn from a real incident —
+ten of sixteen in the corpus are still marked `constructed`, meaning they were
+written from the threat model rather than from something that happened.
+
+Allowlist changes are the highest-risk patch here and are reviewed as such. See
+[CONTRIBUTING.md](CONTRIBUTING.md); if a host is only needed by your project,
+`.blastgate.yaml` handles it without a PR.
+
+Security reports go through [private disclosure](SECURITY.md), not public
+issues. Note that section 8 of the threat model already discloses several things
+that look alarming — but if a disclosure there is wrong or undersells a gap,
+that is a defect worth reporting.
 
 ## License
 
